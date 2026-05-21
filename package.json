@@ -1,0 +1,22 @@
+{
+  "name": "worldcast",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Single-user Safari PWA podcast listener with synced playback state and ID3 chapter support",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "make-icons": "node tools/make-icons.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "node-id3": "^0.2.6",
+    "rss-parser": "^3.13.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

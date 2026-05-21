@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<base href="./">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Worldcast — Sign in</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="login">
+  <main class="login-card">
+    <h1>Worldcast</h1>
+    <p class="muted">Enter the access token configured on the server.</p>
+    <form id="loginForm">
+      <input type="password" id="token" placeholder="Token" autocomplete="off" autofocus required>
+      <button type="submit" class="primary">Sign in</button>
+    </form>
+    <p id="err" class="err" hidden></p>
+  </main>
+  <script>
+    const form = document.getElementById('loginForm');
+    const err  = document.getElementById('err');
+    // baseURI honors <base href> → resolves to the BASE_PATH-mounted root.
+    const BASE = new URL('.', document.baseURI).href;
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const token = document.getElementById('token').value.trim();
+      const r = await fetch(new URL('api/login', BASE), {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({ token })
+      });
+      if (r.ok) {
+        location.href = BASE;
+      } else {
+        err.textContent = 'Invalid token.';
+        err.hidden = false;
+      }
+    });
+  </script>
+</body>
+</html>

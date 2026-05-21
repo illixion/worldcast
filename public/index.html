@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<base href="./">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Worldcast</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="app-header">
+  <h1>Worldcast</h1>
+  <nav>
+    <button id="navLibrary"  class="nav active">Library</button>
+    <button id="navNowPlaying" class="nav">Now Playing</button>
+    <button id="syncBtn" class="icon-btn" title="Sync now">↻</button>
+  </nav>
+</header>
+
+<main id="main">
+
+  <!-- LIBRARY VIEW -->
+  <section id="libraryView" class="view active">
+    <div class="library-actions">
+      <button id="addFeedBtn" class="primary">+ Add Feed</button>
+      <button id="playRandomBtn" class="ghost-btn" title="Play a random never-played episode">🎲 Play Random</button>
+      <span id="syncStatus" class="muted small"></span>
+    </div>
+
+    <section id="recentSection" class="recent-section" hidden>
+      <div class="section-head">
+        <h2>Recently played</h2>
+        <button id="recentToggle" class="ghost small" type="button" hidden>Show all</button>
+      </div>
+      <ul id="recentList" class="episode-list"></ul>
+    </section>
+
+    <h2 class="section-head-solo">Feeds</h2>
+    <ul id="feedList" class="feed-list"></ul>
+  </section>
+
+  <!-- EPISODES VIEW -->
+  <section id="episodesView" class="view">
+    <button id="backToLib" class="ghost">‹ Library</button>
+    <div id="feedHeader" class="feed-header"></div>
+    <ul id="episodeList" class="episode-list"></ul>
+  </section>
+
+  <!-- PLAYER VIEW -->
+  <section id="playerView" class="view">
+    <div class="artwork-wrap">
+      <img id="playerArtwork" alt="">
+      <video id="playerVideo" playsinline preload="metadata" hidden></video>
+    </div>
+    <div class="chapter-info">
+      <div id="playerChapter" class="chapter-title">—</div>
+      <div id="playerEpisode" class="chapter-meta">—</div>
+    </div>
+    <div class="scrub">
+      <div class="scrub-bar" id="scrubBar">
+        <div class="scrub-marks" id="scrubMarks"></div>
+        <div class="scrub-fill" id="scrubFill"></div>
+      </div>
+      <div class="scrub-labels">
+        <span id="curTime">0:00</span>
+        <button id="speedBtn" class="speed-btn" type="button" title="Playback speed">1×</button>
+        <span id="durTime">0:00</span>
+      </div>
+    </div>
+    <div class="controls">
+      <button id="prevChBtn">← Ch</button>
+      <button id="seekBackBtn">‹ 15s</button>
+      <button id="playBtn" class="primary">Play</button>
+      <button id="seekFwdBtn">30s ›</button>
+      <button id="nextChBtn">Ch →</button>
+    </div>
+    <details class="chapter-list-wrap">
+      <summary>Chapters</summary>
+      <ul id="chapterList" class="chapter-list"></ul>
+    </details>
+  </section>
+
+</main>
+
+<!-- MINI PLAYER -->
+<aside id="miniPlayer" class="mini-player" hidden>
+  <img id="miniArtwork" src="icons/icon-192.png" alt="">
+  <div class="mini-text">
+    <div id="miniTitle" class="mini-title">—</div>
+    <div id="miniMeta"  class="mini-meta muted">—</div>
+  </div>
+  <button id="miniPlayBtn" class="primary small">▶</button>
+</aside>
+
+<!-- ADD FEED DIALOG -->
+<dialog id="addFeedDialog" class="dialog">
+  <form method="dialog" id="addFeedForm">
+    <h2>Add Feed</h2>
+    <input type="url" id="feedUrl" placeholder="https://example.com/feed.xml" autocomplete="off" required>
+    <p id="addFeedErr" class="err small" hidden></p>
+    <menu>
+      <button value="cancel" class="ghost">Cancel</button>
+      <button id="addFeedSubmit" value="ok" class="primary">Add</button>
+    </menu>
+  </form>
+</dialog>
+
+<audio id="audio" preload="metadata"></audio>
+<!-- #playerVideo doubles as both the media element and the artwork display
+     for video episodes; the Player class swaps which element is "active". -->
+
+
+<script type="module" src="app.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      // SW URL is relative to the document → resolves under BASE_PATH.
+      // Scope defaults to the SW's URL directory, which matches BASE_PATH/.
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>MediaSession Chapter Test</title>
+<style>
+:root {
+  --bg: #0a0a0a;
+  --surface: #161616;
+  --border: #2a2a2a;
+  --text: #e8e8e8;
+  --muted: #888;
+  --accent: #ff6b35;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --err: #ef4444;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+body {
+  padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+  max-width: 480px;
+  margin: 0 auto;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+h1 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+h1 .sub { color: var(--muted); font-weight: 400; margin-left: 4px; }
+
+.tag {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+.tag.ok { background: rgba(74,222,128,0.15); color: var(--ok); }
+.tag.err { background: rgba(239,68,68,0.15); color: var(--err); }
+.tag.warn { background: rgba(251,191,36,0.15); color: var(--warn); }
+
+.status-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.artwork {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 12px;
+  background: var(--surface);
+  margin-bottom: 16px;
+  overflow: hidden;
+  position: relative;
+}
+.artwork img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.chapter-info {
+  margin-bottom: 18px;
+}
+.chapter-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.chapter-meta {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.scrub {
+  margin-bottom: 18px;
+}
+.scrub-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.scrub-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.25s linear;
+}
+.scrub-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+button {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 10px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s, border-color 0.15s;
+}
+button:active { background: #222; }
+button.primary {
+  background: var(--accent);
+  color: #000;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+button.primary:active { background: #e85a2a; }
+
+.instructions {
+  margin: 0 0 20px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  font-size: 13px;
+  color: #ccc;
+}
+.instructions strong { color: var(--text); }
+.instructions ol { margin-top: 8px; padding-left: 20px; }
+.instructions li { margin-bottom: 4px; }
+
+.log-section h2 {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.log {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.65;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.log-entry { color: var(--muted); white-space: nowrap; }
+.log-entry .time { color: #555; margin-right: 6px; }
+.log-entry .event { color: var(--accent); margin-right: 4px; }
+.log-entry .data { color: var(--text); }
+
+audio { display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>MediaSession Test <span class="sub">/ chapters</span></h1>
+</header>
+
+<div class="status-row" id="statusRow"></div>
+
+<div class="artwork"><img id="artworkImg" alt=""></div>
+
+<div class="chapter-info">
+  <div class="chapter-title" id="chapterTitle">—</div>
+  <div class="chapter-meta" id="chapterMeta">—</div>
+</div>
+
+<div class="scrub">
+  <div class="scrub-bar"><div class="scrub-fill" id="scrubFill"></div></div>
+  <div class="scrub-labels">
+    <span id="curTime">0:00</span>
+    <span id="durTime">0:00</span>
+  </div>
+</div>
+
+<div class="controls">
+  <button id="prevBtn">← Chapter</button>
+  <button id="playBtn" class="primary">Play</button>
+  <button id="nextBtn">Chapter →</button>
+</div>
+
+<div class="instructions">
+  <strong>How to test:</strong>
+  <ol>
+    <li>Tap <strong>Play</strong> (must be from a tap on iOS).</li>
+    <li>Lock your phone <em>or</em> swipe down to Control Center.</li>
+    <li>Watch the artwork and title update at each 30s chapter boundary. The tone pitch shifts too, as an audible cue.</li>
+    <li>Note any lag, sticking, or missed updates in the log below.</li>
+  </ol>
+</div>
+
+<div class="log-section">
+  <h2>Diagnostic Log</h2>
+  <div class="log" id="log"></div>
+</div>
+
+<audio id="audio" preload="auto"></audio>
+
+<script>
+// ===== Chapter definitions =====
+const CHAPTERS = [
+  { title: 'Chapter 1 — Intro', start: 0,  color: '#ff6b35', symbol: '1' },
+  { title: 'Chapter 2 — Body',  start: 30, color: '#4ade80', symbol: '2' },
+  { title: 'Chapter 3 — Aside', start: 60, color: '#3b82f6', symbol: '3' },
+  { title: 'Chapter 4 — Outro', start: 90, color: '#a855f7', symbol: '4' }
+];
+const TOTAL_DURATION = 120;
+const PODCAST_TITLE = 'Test Podcast';
+const EPISODE_TITLE = 'MediaSession Chapter Test';
+
+// ===== Diagnostic log =====
+const logEl = document.getElementById('log');
+function log(event, data) {
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  const t = new Date().toTimeString().slice(0, 8);
+  entry.innerHTML = `<span class="time">${t}</span><span class="event">${event}</span>${data ? '<span class="data">' + data + '</span>' : ''}`;
+  logEl.insertBefore(entry, logEl.firstChild);
+  while (logEl.children.length > 60) logEl.removeChild(logEl.lastChild);
+}
+
+// ===== Capability detection =====
+const statusRow = document.getElementById('statusRow');
+function addTag(text, kind) {
+  const t = document.createElement('span');
+  t.className = 'tag ' + kind;
+  t.textContent = text;
+  statusRow.appendChild(t);
+}
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+              (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = window.navigator.standalone === true ||
+                     window.matchMedia('(display-mode: standalone)').matches;
+const hasMediaSession = 'mediaSession' in navigator;
+const hasPositionState = hasMediaSession && 'setPositionState' in navigator.mediaSession;
+addTag(isIOS ? 'iOS' : 'non-iOS', isIOS ? 'ok' : 'warn');
+addTag(isStandalone ? 'PWA' : 'browser tab', isStandalone ? 'ok' : 'warn');
+addTag(hasMediaSession ? 'MediaSession ✓' : 'no MediaSession', hasMediaSession ? 'ok' : 'err');
+addTag(hasPositionState ? 'PositionState ✓' : 'no PositionState', hasPositionState ? 'ok' : 'warn');
+log('init', `iOS=${isIOS} pwa=${isStandalone} ms=${hasMediaSession} ps=${hasPositionState}`);
+
+// ===== Artwork generation =====
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n >> 16) + amt, g = ((n >> 8) & 0xff) + amt, b = (n & 0xff) + amt;
+  r = Math.max(0, Math.min(255, r));
+  g = Math.max(0, Math.min(255, g));
+  b = Math.max(0, Math.min(255, b));
+  return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+}
+function makeArtwork(chapter, size = 512) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, size, size);
+  grad.addColorStop(0, chapter.color);
+  grad.addColorStop(1, shade(chapter.color, -60));
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  // Big numeral
+  ctx.fillStyle = 'rgba(0,0,0,0.82)';
+  ctx.font = `900 ${size * 0.55}px -apple-system, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(chapter.symbol, size / 2, size / 2 - size * 0.04);
+  // Title strip at bottom
+  ctx.font = `600 ${size * 0.055}px -apple-system, sans-serif`;
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillText(chapter.title, size / 2, size * 0.86);
+  return canvas.toDataURL('image/png');
+}
+CHAPTERS.forEach(c => { c.artwork = makeArtwork(c); });
+
+// ===== Generate a WAV with a pitch-shifting tone per chapter =====
+function makeWav(durationSec, sampleRate = 22050) {
+  const numSamples = Math.floor(durationSec * sampleRate);
+  const buffer = new ArrayBuffer(44 + numSamples * 2);
+  const view = new DataView(buffer);
+  function writeStr(o, s) { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); }
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, numSamples * 2, true);
+  const freqs = [220, 277, 330, 392]; // A3, C#4, E4, G4
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    const ch = Math.min(CHAPTERS.length - 1, Math.floor(t / 30));
+    const env = 0.07; // amplitude, kept quiet
+    const sample = Math.sin(2 * Math.PI * freqs[ch] * t) * env;
+    view.setInt16(44 + i * 2, sample * 32767, true);
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+const audio = document.getElementById('audio');
+audio.src = URL.createObjectURL(makeWav(TOTAL_DURATION));
+log('audio', 'WAV blob generated');
+
+// ===== State + UI =====
+let currentChapterIndex = -1;
+const artworkImg = document.getElementById('artworkImg');
+const chapterTitle = document.getElementById('chapterTitle');
+const chapterMeta = document.getElementById('chapterMeta');
+const scrubFill = document.getElementById('scrubFill');
+const curTime = document.getElementById('curTime');
+const durTime = document.getElementById('durTime');
+const playBtn = document.getElementById('playBtn');
+
+function fmtTime(s) {
+  if (!isFinite(s)) return '0:00';
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+function chapterAt(time) {
+  let idx = 0;
+  for (let i = 0; i < CHAPTERS.length; i++) if (time >= CHAPTERS[i].start) idx = i;
+  return idx;
+}
+function updateMediaSession(idx) {
+  if (!hasMediaSession) return;
+  const ch = CHAPTERS[idx];
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: ch.title,
+    artist: PODCAST_TITLE,
+    album: EPISODE_TITLE,
+    artwork: [{ src: ch.artwork, sizes: '512x512', type: 'image/png' }]
+  });
+  log('metadata→', `"${ch.title}"`);
+}
+function applyChapter(idx) {
+  if (idx === currentChapterIndex) return;
+  currentChapterIndex = idx;
+  const ch = CHAPTERS[idx];
+  artworkImg.src = ch.artwork;
+  chapterTitle.textContent = ch.title;
+  chapterMeta.textContent = `starts ${fmtTime(ch.start)} · ch ${idx + 1}/${CHAPTERS.length}`;
+  updateMediaSession(idx);
+}
+function updatePositionState() {
+  if (!hasPositionState) return;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: TOTAL_DURATION,
+      playbackRate: audio.playbackRate,
+      position: Math.min(audio.currentTime, TOTAL_DURATION)
+    });
+  } catch (e) { log('pos.err', e.message); }
+}
+
+audio.addEventListener('timeupdate', () => {
+  const t = audio.currentTime;
+  curTime.textContent = fmtTime(t);
+  scrubFill.style.width = (t / TOTAL_DURATION * 100) + '%';
+  applyChapter(chapterAt(t));
+});
+audio.addEventListener('loadedmetadata', () => {
+  durTime.textContent = fmtTime(TOTAL_DURATION);
+  log('audio', 'loadedmetadata');
+});
+audio.addEventListener('play', () => {
+  playBtn.textContent = 'Pause';
+  log('audio', 'play');
+  if (hasMediaSession) navigator.mediaSession.playbackState = 'playing';
+  updatePositionState();
+});
+audio.addEventListener('pause', () => {
+  playBtn.textContent = 'Play';
+  log('audio', 'pause');
+  if (hasMediaSession) navigator.mediaSession.playbackState = 'paused';
+});
+audio.addEventListener('ended', () => {
+  playBtn.textContent = 'Play';
+  log('audio', 'ended');
+});
+
+// ===== MediaSession action handlers =====
+if (hasMediaSession) {
+  const handlers = {
+    play:          () => { audio.play(); log('action', 'play'); },
+    pause:         () => { audio.pause(); log('action', 'pause'); },
+    previoustrack: () => { jumpChapter(-1); log('action', 'previoustrack'); },
+    nexttrack:     () => { jumpChapter(1); log('action', 'nexttrack'); },
+    seekbackward:  (d) => { audio.currentTime = Math.max(0, audio.currentTime - (d.seekOffset || 10)); log('action', 'seekbackward'); },
+    seekforward:   (d) => { audio.currentTime = Math.min(TOTAL_DURATION, audio.currentTime + (d.seekOffset || 10)); log('action', 'seekforward'); },
+    seekto:        (d) => { audio.currentTime = d.seekTime; log('action', 'seekto ' + d.seekTime.toFixed(1)); }
+  };
+  for (const [name, fn] of Object.entries(handlers)) {
+    try { navigator.mediaSession.setActionHandler(name, fn); }
+    catch (e) { log('handler.err', `${name}: ${e.message}`); }
+  }
+  log('handlers', 'registered');
+}
+
+// ===== Buttons =====
+function jumpChapter(dir) {
+  const cur = chapterAt(audio.currentTime);
+  const next = Math.max(0, Math.min(CHAPTERS.length - 1, cur + dir));
+  audio.currentTime = CHAPTERS[next].start;
+}
+playBtn.addEventListener('click', () => {
+  if (audio.paused) audio.play().catch(e => log('play.err', e.message));
+  else audio.pause();
+});
+document.getElementById('prevBtn').addEventListener('click', () => jumpChapter(-1));
+document.getElementById('nextBtn').addEventListener('click', () => jumpChapter(1));
+
+// Init
+applyChapter(0);
+durTime.textContent = fmtTime(TOTAL_DURATION);
+setInterval(() => { if (!audio.paused) updatePositionState(); }, 1000);
+</script>
+</body>
+</html>
