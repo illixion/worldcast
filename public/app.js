@@ -20,18 +20,10 @@ function resolveArt(raw) {
   return u(raw.replace(/^\//, ''));
 }
 
-// -------- auth gate --------
-async function checkAuth() {
-  try {
-    const r = await fetch(u('api/whoami'), { credentials: 'same-origin' });
-    const j = await r.json();
-    if (!j.authenticated) { location.href = u('login'); return false; }
-    return true;
-  } catch {
-    location.href = u('login');
-    return false;
-  }
-}
+// Auth is path-based: the URL the page was loaded from already contains the
+// token (mounted under <BASE_PATH>/<TOKEN>/ on the server). Every relative
+// request inherits that prefix via <base href="./">, so there is no cookie,
+// no whoami, no login page. A wrong URL just 404s before reaching the app.
 
 // -------- helpers --------
 function fmtTime(s) {
@@ -49,7 +41,6 @@ function fmtDate(ms) {
 async function api(path, opts = {}) {
   // Accept both "api/x" and "/api/x" — normalize through u().
   const r = await fetch(u(path.replace(/^\//, '')), { credentials: 'same-origin', ...opts });
-  if (r.status === 401) { location.href = u('login'); throw new Error('unauthorized'); }
   if (!r.ok) throw new Error(`${r.status} ${path}`);
   return r.json();
 }
@@ -148,6 +139,10 @@ class Player {
     this.audio.addEventListener('loadedmetadata', seekWhenReady);
 
     this._renderPlayerView();
+    // Force the next _applyChapter to run even if chapter index is unchanged
+    // (e.g. -1 for an episode without chapters) so the mini-player + media
+    // session metadata reflect the new episode.
+    this.currentChapterIdx = Number.NaN;
     this._applyChapter(this._chapterAt(startAt));
     this._preloadArtwork();
 
@@ -156,6 +151,9 @@ class Player {
     }
     showMiniPlayer();
     navigate('playerView');
+    // Refresh the library's "Recently played" so it reflects the new episode
+    // without waiting for a manual reload. Fire-and-forget.
+    renderRecent().catch(() => {});
   }
 
   _chapterAt(timeSec) {
@@ -364,6 +362,8 @@ class Player {
     $('#playerEpisode').textContent = this.episode.feed_title || '';
     const list = $('#chapterList');
     list.innerHTML = '';
+    const wrap = $('#chapterListWrap');
+    if (wrap) wrap.hidden = this.chapters.length === 0;
     this.chapters.forEach((ch, i) => {
       const li = document.createElement('li');
       const img = document.createElement('img');
@@ -456,7 +456,7 @@ function showView(id) {
 // (e.g. which feed the episodes view was showing).
 function navigate(view, payload = {}) {
   const cur = history.state || {};
-  if (cur.view === view && cur.feedId === payload.feedId) {
+  if (cur.view === view && cur.feedId === payload.feedId && cur.episodeId === payload.episodeId) {
     showView(view);
     return;
   }
@@ -479,6 +479,10 @@ async function restoreFromState(state) {
     }
     if (feed) { await renderEpisodes(feed, { push: false }); return; }
     // Feed gone — fall through to library.
+  }
+  if (view === 'detailsView' && state.episodeId != null) {
+    await renderEpisodeDetails(state.episodeId, { push: false });
+    return;
   }
   if (view === 'playerView' && player && player.hasEpisode()) {
     showView('playerView');
@@ -530,7 +534,15 @@ function renderRecentRow(ep) {
   }
 
   li.append(img, text);
-  if (!unavailable) li.addEventListener('click', () => player.load(ep.id));
+  if (!unavailable) {
+    const play = document.createElement('button');
+    play.className = 'play-btn';
+    play.title = 'Play';
+    play.textContent = '▶';
+    play.addEventListener('click', (e) => { e.stopPropagation(); player.load(ep.id); });
+    li.appendChild(play);
+  }
+  li.addEventListener('click', () => renderEpisodeDetails(ep));
   return li;
 }
 
@@ -570,6 +582,95 @@ async function playRandomUnplayed() {
 }
 
 // -------- library / episodes UI --------
+// -------- background poll --------
+// PWA standalone mode swallows the pull-to-refresh gesture, so the UI never
+// gets a chance to pick up server-side changes (hourly RSS sync, chapter
+// extraction completing, or another device updating playback state). Poll
+// while the tab is visible: sync status + recent list always, full feed
+// list only when the library view is active so we don't fight with the
+// player view's own rendering.
+const POLL_MS = 15000;
+let pollTimer = null;
+
+async function pollRefresh() {
+  if (document.visibilityState !== 'visible') return;
+  try {
+    const ss = await api('/api/sync/status');
+    $('#syncStatus').textContent = ss.chaptersPending > 0
+      ? `extracting chapters for ${ss.chaptersPending} episode(s)…`
+      : (ss.lastFeedSyncAt ? `synced ${fmtDate(ss.lastFeedSyncAt)}` : '');
+  } catch { /* network blip — try again next tick */ }
+  renderRecent().catch(() => {});
+  const onLibrary = $('#libraryView').classList.contains('active');
+  if (onLibrary) renderFeedsOnly().catch(() => {});
+}
+
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(pollRefresh, POLL_MS);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') pollRefresh();
+});
+// pageshow with persisted=true fires when iOS restores from the bfcache /
+// app switcher — treat it like a wake-up.
+window.addEventListener('pageshow', (e) => { if (e.persisted) pollRefresh(); });
+
+// Re-render just the feed cards (badges + counts) without disturbing the
+// rest of the library DOM or kicking the status indicator.
+async function renderFeedsOnly() {
+  const { feeds } = await api('/api/feeds');
+  const list = $('#feedList');
+  // Skip if the user is mid-interaction (e.g. confirm() open) — list missing
+  // children is a sign the view is being rebuilt.
+  if (!list) return;
+  list.innerHTML = '';
+  if (feeds.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'muted small';
+    li.textContent = 'No feeds yet. Add one with the + button.';
+    list.appendChild(li);
+    return;
+  }
+  for (const f of feeds) list.appendChild(renderFeedCard(f));
+}
+
+function renderFeedCard(f) {
+  const li = document.createElement('li');
+  li.className = 'feed-card';
+  const img = document.createElement('img');
+  img.className = 'art';
+  img.src = resolveArt(f.artwork_url) || u('icons/icon-192.png');
+  img.alt = '';
+  const text = document.createElement('div');
+  text.style.flex = '1';
+  text.style.minWidth = '0';
+  const name = document.createElement('div'); name.className = 'name'; name.textContent = f.title || f.url;
+  const meta = document.createElement('div'); meta.className = 'meta';
+  meta.textContent = `${f.episode_count} episodes${f.unplayed_count > 0 ? ` · ${f.unplayed_count} new` : ''}`;
+  text.append(name, meta);
+  li.append(img, text);
+  if (f.unplayed_count > 0) {
+    const b = document.createElement('span'); b.className = 'badge'; b.textContent = f.unplayed_count;
+    li.appendChild(b);
+  }
+  const del = document.createElement('button');
+  del.className = 'del';
+  del.textContent = '×';
+  del.title = 'Unsubscribe';
+  del.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!confirm(`Unsubscribe from ${f.title || f.url}?`)) return;
+    await api(`/api/feeds/${f.id}`, { method: 'DELETE' });
+    renderLibrary();
+  });
+  li.appendChild(del);
+  li.addEventListener('click', () => renderEpisodes(f));
+  cachedFeedsById.set(f.id, f);
+  return li;
+}
+
 async function renderLibrary() {
   const status = $('#syncStatus');
   status.textContent = 'loading…';
@@ -583,39 +684,7 @@ async function renderLibrary() {
     li.textContent = 'No feeds yet. Add one with the + button.';
     list.appendChild(li);
   }
-  for (const f of feeds) {
-    const li = document.createElement('li');
-    li.className = 'feed-card';
-    const img = document.createElement('img');
-    img.className = 'art';
-    img.src = resolveArt(f.artwork_url) || u('icons/icon-192.png');
-    img.alt = '';
-    const text = document.createElement('div');
-    text.style.flex = '1';
-    text.style.minWidth = '0';
-    const name = document.createElement('div'); name.className = 'name'; name.textContent = f.title || f.url;
-    const meta = document.createElement('div'); meta.className = 'meta';
-    meta.textContent = `${f.episode_count} episodes${f.unplayed_count > 0 ? ` · ${f.unplayed_count} new` : ''}`;
-    text.append(name, meta);
-    li.append(img, text);
-    if (f.unplayed_count > 0) {
-      const b = document.createElement('span'); b.className = 'badge'; b.textContent = f.unplayed_count;
-      li.appendChild(b);
-    }
-    const del = document.createElement('button');
-    del.className = 'del';
-    del.textContent = '×';
-    del.title = 'Unsubscribe';
-    del.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      if (!confirm(`Unsubscribe from ${f.title || f.url}?`)) return;
-      await api(`/api/feeds/${f.id}`, { method: 'DELETE' });
-      renderLibrary();
-    });
-    li.appendChild(del);
-    li.addEventListener('click', () => renderEpisodes(f));
-    list.appendChild(li);
-  }
+  for (const f of feeds) list.appendChild(renderFeedCard(f));
   const ss = await api('/api/sync/status');
   status.textContent = ss.chaptersPending > 0
     ? `extracting chapters for ${ss.chaptersPending} episode(s)…`
@@ -687,16 +756,140 @@ async function renderEpisodes(feed, { push = true } = {}) {
       renderEpisodes(feed);
     });
 
-    li.append(text, check);
+    const play = document.createElement('button');
+    play.className = 'play-btn';
+    play.title = 'Play';
+    play.textContent = '▶';
+    play.addEventListener('click', (e) => { e.stopPropagation(); player.load(ep.id); });
+
+    li.append(text, play, check);
     if (unavailable) {
       li.addEventListener('click', (e) => {
         e.preventDefault();
         $('#syncStatus').textContent = `“${ep.title}” — audio file missing on server`;
       });
     } else {
-      li.addEventListener('click', () => player.load(ep.id));
+      li.addEventListener('click', () => renderEpisodeDetails(ep));
     }
     list.appendChild(li);
+  }
+}
+
+// -------- HTML sanitizer for episode descriptions --------
+// Allowlist-based: parse into a detached <template>, walk the tree, strip
+// any tag not in ALLOWED_TAGS, drop event handlers and javascript: URLs,
+// and only keep a small set of attributes. Runs entirely client-side — the
+// parsed nodes are never attached to the live document until after scrubbing,
+// so inline <script>/<img onerror> never execute.
+const ALLOWED_TAGS = new Set([
+  'A','P','BR','HR','STRONG','EM','B','I','U','S','SMALL','SUP','SUB',
+  'UL','OL','LI','BLOCKQUOTE','CODE','PRE',
+  'H1','H2','H3','H4','H5','H6','SPAN','DIV','IMG'
+]);
+const ALLOWED_ATTRS = new Set(['href','src','alt','title','target','rel']);
+function sanitizeHtml(raw, { allowRemoteMedia = false } = {}) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = String(raw || '');
+  const scrub = (node) => {
+    for (const el of Array.from(node.children)) {
+      if (!ALLOWED_TAGS.has(el.tagName)) {
+        while (el.firstChild) el.parentNode.insertBefore(el.firstChild, el);
+        el.remove();
+        continue;
+      }
+      for (const attr of Array.from(el.attributes)) {
+        const n = attr.name.toLowerCase();
+        const v = attr.value || '';
+        if (!ALLOWED_ATTRS.has(n)) { el.removeAttribute(attr.name); continue; }
+        if ((n === 'href' || n === 'src') && /^\s*(javascript|data|vbscript):/i.test(v)) {
+          el.removeAttribute(attr.name);
+        }
+      }
+      if (el.tagName === 'A') {
+        el.setAttribute('target', '_blank');
+        el.setAttribute('rel', 'noopener noreferrer');
+      }
+      // Privacy gate: defer remote <img> loads. Move src → data-src and
+      // replace the element with a placeholder. The browser never fetches
+      // anything off-origin until the user opts in. When the user toggles
+      // remote media on, we re-serialize the original description with
+      // allowRemoteMedia=true rather than mutating in place.
+      if (el.tagName === 'IMG' && !allowRemoteMedia) {
+        const src = el.getAttribute('src') || '';
+        const ph = document.createElement('span');
+        ph.className = 'img-placeholder';
+        ph.setAttribute('data-src', src);
+        ph.textContent = src ? `🖼 remote image hidden — ${src}` : '🖼 remote image hidden';
+        el.replaceWith(ph);
+        continue;
+      }
+      scrub(el);
+    }
+  };
+  scrub(tpl.content);
+  return tpl.innerHTML;
+}
+
+// -------- details view --------
+const cachedEpisodesById = new Map();
+let currentDetailsEpId = null;
+const IMG_GATE_KEY = 'worldcast.allowRemoteImages';
+let allowRemoteImages = (() => {
+  try { return localStorage.getItem(IMG_GATE_KEY) === '1'; } catch { return false; }
+})();
+function setImgGateLabel() {
+  const btn = $('#detailsImgBtn');
+  if (btn) btn.textContent = allowRemoteImages ? '🖼 Images: on' : '🖼 Images: off';
+}
+
+async function renderEpisodeDetails(epOrId, { push = true } = {}) {
+  const id = typeof epOrId === 'object' ? epOrId.id : Number(epOrId);
+  currentDetailsEpId = id;
+  if (push) navigate('detailsView', { episodeId: id });
+  else showView('detailsView');
+
+  const header = $('#detailsHeader');
+  const descEl = $('#detailsDescription');
+  const playBtn = $('#detailsPlayBtn');
+
+  let cached = cachedEpisodesById.get(id);
+  if (!cached && typeof epOrId === 'object') cached = epOrId;
+  const renderFrom = (ep) => {
+    header.innerHTML = '';
+    const img = document.createElement('img');
+    img.src = resolveArt(ep.artwork_url) || resolveArt(ep.feed_artwork_url) || u('icons/icon-192.png');
+    img.alt = '';
+    const text = document.createElement('div');
+    text.style.flex = '1';
+    text.style.minWidth = '0';
+    const title = document.createElement('div');
+    title.className = 'd-title';
+    title.textContent = ep.title || '';
+    const meta = document.createElement('div');
+    meta.className = 'd-meta';
+    const dur = ep.duration_seconds ? ` · ${fmtTime(ep.duration_seconds)}` : '';
+    meta.textContent = `${ep.feed_title || ''} · ${fmtDate(ep.pub_date)}${dur}`;
+    text.append(title, meta);
+    header.append(img, text);
+
+    descEl.innerHTML = ep.description
+      ? sanitizeHtml(ep.description, { allowRemoteMedia: allowRemoteImages })
+      : '<p class="muted small">No description.</p>';
+    setImgGateLabel();
+
+    playBtn.disabled = ep.audio_available === 0;
+    playBtn.textContent = ep.audio_available === 0 ? 'Audio unavailable' : '▶ Play';
+    playBtn.onclick = () => { if (ep.audio_available !== 0) player.load(ep.id); };
+  };
+  if (cached) renderFrom(cached);
+  else descEl.innerHTML = '<p class="muted small">loading…</p>';
+
+  try {
+    const { episode } = await api(`/api/episodes/${id}`);
+    cachedEpisodesById.set(id, episode);
+    renderFrom(episode);
+  } catch (e) {
+    if (!cached) descEl.innerHTML = `<p class="err small">Could not load: ${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -733,7 +926,6 @@ function initScrubBar() {
 // -------- boot --------
 let player;
 (async () => {
-  if (!(await checkAuth())) return;
   player = new Player($('#audio'), $('#playerVideo'));
   initScrubBar();
 
@@ -750,6 +942,28 @@ let player;
   // on the login redirect — the bug we're fixing).
   history.replaceState({ view: 'libraryView' }, '');
   window.addEventListener('popstate', (e) => { restoreFromState(e.state); });
+
+  setImgGateLabel();
+  $('#detailsImgBtn').addEventListener('click', () => {
+    allowRemoteImages = !allowRemoteImages;
+    try { localStorage.setItem(IMG_GATE_KEY, allowRemoteImages ? '1' : '0'); } catch {}
+    setImgGateLabel();
+    if (currentDetailsEpId != null) {
+      const cached = cachedEpisodesById.get(currentDetailsEpId);
+      if (cached) renderEpisodeDetails(cached, { push: false });
+    }
+  });
+  $('#backFromDetails').addEventListener('click', () => {
+    if (history.state && history.state.view === 'detailsView') history.back();
+    else navigate('libraryView');
+  });
+  const openCurrentDetails = () => {
+    if (player.hasEpisode()) renderEpisodeDetails(player.episode);
+  };
+  $('#playerChapter').addEventListener('click', openCurrentDetails);
+  $('#playerChapter').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCurrentDetails(); }
+  });
 
   $('#playBtn').addEventListener('click', () => player.toggle());
   $('#miniPlayBtn').addEventListener('click', (e) => { e.stopPropagation(); player.toggle(); });
@@ -794,4 +1008,5 @@ let player;
   });
 
   await renderLibrary();
+  startPolling();
 })();

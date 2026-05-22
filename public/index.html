@@ -52,6 +52,17 @@
     <ul id="episodeList" class="episode-list"></ul>
   </section>
 
+  <!-- EPISODE DETAILS VIEW -->
+  <section id="detailsView" class="view">
+    <button id="backFromDetails" class="ghost">‹ Back</button>
+    <div id="detailsHeader" class="details-header"></div>
+    <div class="details-actions">
+      <button id="detailsPlayBtn" class="primary">▶ Play</button>
+      <button id="detailsImgBtn" class="ghost-btn" type="button" title="Toggle remote images in description">🖼 Images: off</button>
+    </div>
+    <div id="detailsDescription" class="details-description"></div>
+  </section>
+
   <!-- PLAYER VIEW -->
   <section id="playerView" class="view">
     <div class="artwork-wrap">
@@ -59,7 +70,7 @@
       <video id="playerVideo" playsinline preload="metadata" hidden></video>
     </div>
     <div class="chapter-info">
-      <div id="playerChapter" class="chapter-title">—</div>
+      <div id="playerChapter" class="chapter-title" role="button" tabindex="0" title="Open episode details">—</div>
       <div id="playerEpisode" class="chapter-meta">—</div>
     </div>
     <div class="scrub">
@@ -80,10 +91,10 @@
       <button id="seekFwdBtn">30s ›</button>
       <button id="nextChBtn">Ch →</button>
     </div>
-    <details class="chapter-list-wrap">
-      <summary>Chapters</summary>
+    <section class="chapter-list-wrap" id="chapterListWrap" hidden>
+      <h3 class="chapter-list-heading">Chapters</h3>
       <ul id="chapterList" class="chapter-list"></ul>
-    </details>
+    </section>
   </section>
 
 </main>
