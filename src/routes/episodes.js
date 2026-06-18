@@ -96,7 +96,7 @@ export function mountEpisodeRoutes(api, { db }) {
       SELECT
         e.id, e.feed_id, e.title, e.audio_url, e.audio_type, e.duration_seconds, e.pub_date,
         e.artwork_url, e.artwork_path, e.audio_available, e.position_seconds, e.played, e.last_played_at,
-        f.title AS feed_title, f.artwork_url AS feed_artwork_url, f.artwork_path AS feed_artwork_path, f.artwork_path AS feed_artwork_path,
+        f.title AS feed_title, f.artwork_url AS feed_artwork_url, f.artwork_path AS feed_artwork_path,
         (SELECT COUNT(*) FROM chapters c WHERE c.episode_id = e.id) AS chapter_count
       FROM episodes e
       JOIN feeds f ON f.id = e.feed_id
