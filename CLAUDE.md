@@ -37,19 +37,23 @@ SYNC_INTERVAL_MS=999999999 npm start        # disable hourly sync for testing
 sqlite3 data/pcast.db                       # inspect state
 ```
 
-Auth: every request needs either `Authorization: Bearer $PCAST_TOKEN` or the
-`pcast_token` cookie. Static shell + manifest + SW + login page are public
-so the PWA can install before login.
+Auth: **the URL path is the secret.** The whole app mounts under
+`<BASE_PATH>/<TOKEN>/` — any request whose path doesn't begin with the right
+token gets a flat 404 before reaching the app router. No cookies, no login
+page, no session. `PCAST_TOKEN` must be URL-safe (`[A-Za-z0-9._~-]`, ≥8 chars)
+because it doubles as a path segment. The home-screen PWA install bakes this
+URL into `start_url`, so cold launches re-enter with the token intact. Treat
+the URL like a bearer token: anyone with it has full access — only share over
+trusted transport (Tailscale serve).
 
 ## Architecture cheat-sheet
 
 ```
 Browser ──HTTPS via Tailscale──► Express (src/server.js)
+   GET <BASE_PATH>/<TOKEN>/...      app.use(TOKEN_PREFIX, root)  ← path-gate; else flat 404
                                    ├── /          → public/index.html
-                                   ├── /login     → public/login.html
-                                   ├── /api/login, /api/logout, /api/whoami
-                                   ├── /api/*     → requireAuth → feeds/episodes/sync/audio
-                                   └── /artwork/* → requireAuth → chapter PNG/JPEG
+                                   ├── /api/*     → feeds/episodes/sync/audio
+                                   └── /artwork/* → chapter/feed/episode PNG/JPEG
                                  │
                                  ├── better-sqlite3 → data/pcast.db
                                  ├── fs            → data/artwork/<ep>/<n>.<ext>
@@ -57,7 +61,8 @@ Browser ──HTTPS via Tailscale──► Express (src/server.js)
 ```
 
 Everything lives on a single `root` express.Router mounted at
-`BASE_PATH || '/'`. The mount-prefix story matters; see "Gotchas" below.
+`<BASE_PATH>/<TOKEN>` (see `TOKEN_PREFIX` in `server.js`). The mount-prefix
+story matters; see "Gotchas" below.
 
 Client uses a `Player` class (`public/app.js`) that adapts the
 `docs/example.html` pattern against real chapter data from the API.
@@ -76,9 +81,10 @@ Client uses a `Player` class (`public/app.js`) that adapts the
    `file://` to `api/audio/:id` before returning. Don't expose DB
    `audio_url` directly to the client.
 
-3. **`sendBeacon` cannot set headers**, so cookie auth on `/api/*` is
-   load-bearing for position sync. Don't switch position sync to
-   bearer-only.
+3. **No header-based auth.** Auth is entirely the URL path prefix
+   (`<BASE_PATH>/<TOKEN>/`), so `sendBeacon` position sync works without
+   setting any headers — the token is already in the request path via
+   `<base href="./">`. Don't reintroduce a bearer/cookie scheme.
 
 4. **Service worker never intercepts `/api/*`, `/artwork/*`, or audio Range
    requests.** Safari's audio element does its own Range handling; SW
@@ -119,9 +125,11 @@ Client uses a `Player` class (`public/app.js`) that adapts the
   the browser-side prefix is handled entirely by `<base href="./">` +
   relative URLs.
 
-- **Cookie path tracks `BASE_PATH`.** `auth.js#setLoginCookie(res, token,
-  path)`. If `BASE_PATH=/pod`, the cookie's `Path=/pod` — it won't be sent
-  to bare-path requests. That's intentional.
+- **The token is part of the mount prefix, not just `BASE_PATH`.** The app
+  router mounts at `TOKEN_PREFIX = ${BASE_PATH}/${TOKEN}`. With Tailscale
+  serve `--set-path` stripping the `BASE_PATH`, the browser still requests
+  `/<BASE_PATH>/<TOKEN>/...` and only the token segment survives to the
+  backend — which is exactly the segment the path-gate checks.
 
 - **node-id3 chapter shape varies slightly between versions.** The
   normalizer in `src/sync/chapters.js#normalizeChapter` accepts both
@@ -149,24 +157,22 @@ Client uses a `Player` class (`public/app.js`) that adapts the
 ## Where things live
 
 ```
-src/server.js                 # Express entrypoint, single root router mounted at BASE_PATH
+src/server.js                 # Express entrypoint; path-gates on TOKEN_PREFIX, mounts root router
 src/db.js + src/init.sql      # SQLite open + idempotent migrations
-src/auth.js                   # bearer-or-cookie middleware + cookie helpers
-src/routes/auth.js            # /api/login, /api/logout, /api/whoami
-src/routes/feeds.js           # CRUD for feeds; POST triggers an immediate sync
-src/routes/episodes.js        # list/detail/position/played/next/rechapter; rewrites audio_url
+src/routes/feeds.js           # CRUD for feeds; POST triggers an immediate sync; privatizes artwork
+src/routes/episodes.js        # list/detail/position/played/next/rechapter; rewrites audio_url + artwork
 src/routes/sync.js            # POST /api/sync (fire and forget); GET /api/sync/status
-src/routes/artwork.js         # serves cached chapter JPEG/PNG
+src/routes/artwork.js         # serves locally-cached chapter/feed/episode JPEG/PNG
 src/routes/audio.js           # Range-streams local file:// audio
-src/sync/rss.js               # rss-parser based feed sync; handles file:// + http
+src/sync/rss.js               # rss-parser based feed sync; handles file:// + http; caches artwork
 src/sync/chapters.js          # ID3 CHAP/APIC extractor; up-front statSync for file://
 src/sync/scheduler.js         # runs every SYNC_INTERVAL_MS; library scan + reconcile + extract queue
 src/util/local.js             # file:// helpers + isInsideLibrary path-safety
 src/util/id3.js               # fetchId3TagBytes — HTTP Range or fs.open by URL scheme
+src/util/artwork-cache.js     # ensureCachedImage — fetch-once remote image → data/artwork/
 src/util/log.js               # tiny timestamped logger
 
 public/index.html             # PWA shell, <base href="./">, MediaSession-using app.js
-public/login.html             # one-input token form, POSTs /api/login
 public/app.js                 # Player class + library/episode views
 public/styles.css
 public/sw.js                  # caches shell only; never /api/, /artwork/, audio
@@ -179,6 +185,7 @@ docs/example.html             # original MediaSession lockscreen test page — c
 data/                         # gitignored
 ├── pcast.db                  # SQLite (WAL mode)
 ├── artwork/<ep>/<n>.<ext>    # extracted per-chapter APIC images
+├── artwork/{feed,episode}/<id>.<ext>  # cached feed/episode artwork (privacy: no remote URLs to client)
 └── library/**/*.xml          # local feed XMLs (LOCAL_LIBRARY_DIR)
 ```
 
@@ -190,8 +197,7 @@ rely on schema_version — we use feature detection via `PRAGMA table_info`.
 
 **Add an API endpoint.** Inside one of the `mountXxxRoutes(api, ctx)`
 functions. Use mount-relative paths (`api.get('/feeds', …)`, NOT
-`/api/feeds`). Auth routes (`/api/login` etc.) are the exception — they
-live on the `root` router with fully-qualified paths.
+`/api/feeds`) — the router is mounted at `/api` under the token-gated `root`.
 
 **Touch the client URL story.** Don't introduce absolute paths. Funnel
 everything through `u(path)` for general URLs and `resolveArt(raw)` for
@@ -201,10 +207,11 @@ leading slashes, so `api('/api/foo')` and `api('api/foo')` both work.
 **Verify a change end-to-end.** Use a provided local feed under `data/library/` with relative + absolute `file://`
 enclosures (tests local mode + path-safety).
 
-Smoke-test with `curl` against `/api/whoami`, `/api/feeds`,
-`/api/episodes/:id`, and `/api/audio/:id` (try `Range: bytes=0-9999`,
-`Range: bytes=-1024`, and an out-of-range to confirm 416). `sqlite3
-data/pcast.db` is faster than scripting for state inspection.
+Smoke-test with `curl` against the **token-prefixed** paths —
+`/<TOKEN>/api/feeds`, `/<TOKEN>/api/episodes/:id`, and `/<TOKEN>/api/audio/:id`
+(try `Range: bytes=0-9999`, `Range: bytes=-1024`, and an out-of-range to
+confirm 416). A request without the token prefix should get a flat 404.
+`sqlite3 data/pcast.db` is faster than scripting for state inspection.
 
 **Add a UI feature on the player.** Re-read `docs/example.html` first.
 The MediaSession + chapter-boundary pattern there is the spec; deviating

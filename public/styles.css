@@ -630,36 +630,3 @@ button.ghost-btn:active { background: var(--surface-2); }
   justify-content: flex-end;
   list-style: none;
 }
-
-/* ---------- login ---------- */
-
-body.login {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  min-height: 100vh;
-}
-.login-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 24px;
-  width: 100%;
-  max-width: 360px;
-}
-.login-card h1 { font-size: 20px; margin-bottom: 6px; }
-.login-card p { font-size: 13px; }
-.login-card form {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 16px;
-}
-.login-card input {
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
-}

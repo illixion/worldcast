@@ -50,7 +50,7 @@ on the forwarded request (some nginx setups, traefik with `PathPrefix` without
 a stripping proxy produces a 404 (or worse, a loop if you also have a
 redirect helper in front of the app).
 
-Open the Tailscale-served HTTPS URL on the iPhone, sign in with the token, then **Share → Add to Home Screen** to install the PWA. Lockscreen Now Playing controls only behave reliably when the app is installed (standalone display mode).
+Open the token URL — `https://<host>/<PCAST_TOKEN>/` — on the iPhone, then **Share → Add to Home Screen** to install the PWA. There's no login form: the token is the path prefix, so the whole app lives behind that URL and bookmarking/installing it carries the credential. Lockscreen Now Playing controls only behave reliably when the app is installed (standalone display mode).
 
 ## Local library (drop-folder for archives)
 
@@ -95,15 +95,14 @@ UI if you want it gone.
 
 ```
 src/
-├── server.js              # Express entrypoint
+├── server.js              # Express entrypoint; path-gates on the token prefix
 ├── db.js / init.sql       # better-sqlite3 + schema
-├── auth.js                # Bearer + cookie middleware
-├── routes/                # feeds, episodes, sync, artwork, auth
+├── routes/                # feeds, episodes, sync, artwork, audio
 ├── sync/
-│   ├── rss.js             # RSS fetch + episode upsert
+│   ├── rss.js             # RSS fetch + episode upsert + artwork caching
 │   ├── chapters.js        # ID3 CHAP/APIC extractor (Range-fetched)
 │   └── scheduler.js       # hourly sync + chapter extraction queue
-└── util/                  # id3 byte ops, logging
+└── util/                  # id3 byte ops, file:// helpers, artwork cache, logging
 public/                    # PWA shell (index.html, app.js, sw.js, manifest, icons)
 docs/example.html          # original MediaSession reference
 tools/make-icons.mjs       # pure-Node PNG icon generator (run via `npm run make-icons`)
@@ -114,5 +113,6 @@ data/                      # SQLite DB + cached chapter artwork (gitignored)
 
 - **No offline audio caching.** Audio is streamed from origin every time. The service worker only caches the app shell.
 - **ID3 chapters only.** Podlove Simple Chapters (`<podcast:chapters>` JSON via the podcast namespace) is not yet implemented — many modern podcasts ship chapters that way instead, and adding that extractor is the obvious next step.
-- **Single user, single device at a time.** Concurrent playback isn't reconciled; whichever device pushes the last position wins.
-- **Tailscale gates the origin.** The bearer token is secondary defense.
+- **Single user.** Position writes carry a client timestamp (`client_ts`) so a late/out-of-order beacon from one device can't clobber a newer position from another, but there's no true multi-listener reconciliation beyond that.
+- **The URL path is the credential.** The app mounts at `<BASE_PATH>/<TOKEN>/`; any request without the right token prefix gets a flat 404 — there's no login page or cookie. Treat the URL like a password and only serve it over trusted transport. Tailscale gating the origin is the primary defense; the path token is secondary.
+- **Artwork is fetched once and served locally.** Feed/episode images are cached under `data/artwork/` on sync and the upstream URL is never sent to the client, so the podcast host can't observe when you browse or play.
