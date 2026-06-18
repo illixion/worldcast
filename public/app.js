@@ -184,9 +184,17 @@ class Player {
     };
     this._attach(this.audio);
 
-    // Position sync only on pause / seek / hide / unload.
+    // Position sync only on pause / seek / hide / unload — never periodic.
+    // Both visibility edges push: 'hidden' captures the position at the moment
+    // of backgrounding; 'visible' captures any position reached while the page
+    // was frozen on the lock screen (e.g. listening then pausing there), since
+    // a frozen context can't beacon at that instant. audio.currentTime is still
+    // accurate on thaw, so this reconciles a lock-screen pause before another
+    // device could resume past it. Edge-triggered, so the no-chatter contract
+    // (CLAUDE.md rule 7) still holds.
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') this._pushPosition();
+      this._pushPosition();
+      if (document.visibilityState === 'visible') this._reconcileOnForeground();
     });
     window.addEventListener('pagehide', () => this._pushPosition());
     window.addEventListener('beforeunload', () => this._pushPosition());
@@ -271,6 +279,7 @@ class Player {
   }
 
   _onPlay() {
+    this._intendPlaying = true;
     $('#playBtn').textContent = 'Pause';
     $('#miniPlayBtn').textContent = '❚❚';
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
@@ -281,11 +290,34 @@ class Player {
   }
 
   _onPause() {
+    this._intendPlaying = false;
     $('#playBtn').textContent = 'Play';
     $('#miniPlayBtn').textContent = '▶';
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
     if (this.positionInterval) { clearInterval(this.positionInterval); this.positionInterval = null; }
     this._pushPosition();
+  }
+
+  // When the PWA is foregrounded, iOS may have left the media element in a
+  // desynced state: the clock display is frozen at the position it had when
+  // the page was suspended, even though the element is "playing" — the user
+  // currently has to manually pause/unpause to unstick it. Reconcile here:
+  // repaint the UI from the element's real state, and if we intended to be
+  // playing but the element is paused, re-issue play() (now allowed — the page
+  // is foreground again). Best-effort; the iOS suspend/resume behavior here is
+  // not fully specified, so treat this as a mitigation, not a guarantee.
+  _reconcileOnForeground() {
+    if (!this.episode) return;
+    // Repaint scrub + chapter from the element's actual currentTime, in case
+    // timeupdate didn't fire across the suspend boundary.
+    this._renderScrub(this.audio.currentTime || 0);
+    this._updatePositionState();
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = this.audio.paused ? 'paused' : 'playing';
+    }
+    if (this._intendPlaying && this.audio.paused) {
+      this.audio.play().catch(() => {/* stays paused; UI already reflects it */});
+    }
   }
 
   async _onEnded() {
@@ -402,7 +434,10 @@ class Player {
   _pushPosition() {
     if (!this.episode) return;
     const pos = this.audio.currentTime || 0;
-    const body = JSON.stringify({ position: pos });
+    // client_ts lets the server order this write against other devices and
+    // late-arriving beacons (see /episodes/:id/position). Date.now() is the
+    // moment we observed the position, not when the request lands.
+    const body = JSON.stringify({ position: pos, client_ts: Date.now() });
     const url = u(`api/episodes/${this.episode.id}/position`);
     try {
       const blob = new Blob([body], { type: 'application/json' });
