@@ -19,13 +19,34 @@ export function openDb(dbPath) {
 
 function migrate(db) {
   // Idempotent column additions for DBs created before a column existed.
-  const cols = db.prepare("PRAGMA table_info(episodes)").all();
-  const has = (name) => cols.some(c => c.name === name);
-  if (!has('audio_available')) {
+  const epCols = db.prepare("PRAGMA table_info(episodes)").all();
+  const epHas = (name) => epCols.some(c => c.name === name);
+  if (!epHas('audio_available')) {
     db.exec(`ALTER TABLE episodes ADD COLUMN audio_available INTEGER NOT NULL DEFAULT 1`);
   }
-  if (!has('last_played_at')) {
+  if (!epHas('last_played_at')) {
     db.exec(`ALTER TABLE episodes ADD COLUMN last_played_at INTEGER`);
+  }
+  if (!epHas('artwork_path')) {
+    db.exec(`ALTER TABLE episodes ADD COLUMN artwork_path TEXT`);
+  }
+  if (!epHas('artwork_mime')) {
+    db.exec(`ALTER TABLE episodes ADD COLUMN artwork_mime TEXT`);
+  }
+  // Client clock (epoch ms) of the most recent accepted position write. Lets
+  // the position route reject out-of-order writes from a different device or a
+  // late-arriving beacon, instead of blindly last-write-wins. NULL = unknown
+  // (legacy rows / writes from clients that don't send a timestamp).
+  if (!epHas('position_client_ts')) {
+    db.exec(`ALTER TABLE episodes ADD COLUMN position_client_ts INTEGER`);
+  }
+  const fCols = db.prepare("PRAGMA table_info(feeds)").all();
+  const fHas = (name) => fCols.some(c => c.name === name);
+  if (!fHas('artwork_path')) {
+    db.exec(`ALTER TABLE feeds ADD COLUMN artwork_path TEXT`);
+  }
+  if (!fHas('artwork_mime')) {
+    db.exec(`ALTER TABLE feeds ADD COLUMN artwork_mime TEXT`);
   }
 }
 

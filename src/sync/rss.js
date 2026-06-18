@@ -3,6 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { now } from '../db.js';
 import { log } from '../util/log.js';
 import { fileURLToPath, resolveEnclosureUrl } from '../util/local.js';
+import { ensureCachedImage } from '../util/artwork-cache.js';
 
 const parser = new Parser({
   customFields: {
@@ -92,6 +93,9 @@ export async function syncFeedById(ctx, feedId) {
   const src = await loadFeedSource(feed);
   if (src.notModified) {
     db.prepare('UPDATE feeds SET last_synced_at = ? WHERE id = ?').run(now(), feedId);
+    // Still try to fill in any artwork that's missing on disk (e.g. cache
+    // was cleared) — won't re-download anything already present.
+    await cacheArtworkForFeed(ctx, feedId);
     return { newEpisodeIds: [], notModified: true };
   }
 
@@ -154,8 +158,59 @@ export async function syncFeedById(ctx, feedId) {
   });
   tx(parsed.items || []);
 
+  await cacheArtworkForFeed(ctx, feedId);
+
   log.info(`feed ${feedId} (${parsed.title || feed.url}) → ${newIds.length} new of ${parsed.items?.length || 0}${skipped ? `, skipped ${skipped} (bad/outside-library URLs)` : ''}`);
   return { newEpisodeIds: newIds, notModified: false };
+}
+
+// Cache the feed's own artwork + every episode under it that's still missing
+// a local copy. Episodes whose remote URL matches an already-cached URL
+// (typically the feed-level fallback) reuse the existing file rather than
+// re-downloading. Failures are non-fatal — we'll try again on the next sync.
+async function cacheArtworkForFeed(ctx, feedId) {
+  const { db, dataDir } = ctx;
+  const f = db.prepare(
+    'SELECT id, artwork_url, artwork_path, artwork_mime FROM feeds WHERE id = ?'
+  ).get(feedId);
+  if (!f) return;
+
+  const byUrl = new Map();
+  if (f.artwork_url) {
+    const r = await ensureCachedImage({
+      dataDir, kind: 'feed', id: f.id,
+      remoteUrl: f.artwork_url, currentPath: f.artwork_path, currentMime: f.artwork_mime,
+    });
+    if (r) {
+      if (r.changed) {
+        db.prepare('UPDATE feeds SET artwork_path=?, artwork_mime=? WHERE id=?')
+          .run(r.path, r.mime, f.id);
+      }
+      byUrl.set(f.artwork_url, { path: r.path, mime: r.mime });
+    }
+  }
+
+  const eps = db.prepare(
+    `SELECT id, artwork_url, artwork_path, artwork_mime
+     FROM episodes
+     WHERE feed_id = ? AND artwork_path IS NULL AND artwork_url IS NOT NULL`
+  ).all(feedId);
+  const epUpdate = db.prepare(
+    'UPDATE episodes SET artwork_path=?, artwork_mime=? WHERE id=?'
+  );
+  for (const ep of eps) {
+    let entry = byUrl.get(ep.artwork_url);
+    if (!entry) {
+      const r = await ensureCachedImage({
+        dataDir, kind: 'episode', id: ep.id,
+        remoteUrl: ep.artwork_url, currentPath: null, currentMime: null,
+      });
+      if (!r) continue;
+      entry = { path: r.path, mime: r.mime };
+      byUrl.set(ep.artwork_url, entry);
+    }
+    epUpdate.run(entry.path, entry.mime, ep.id);
+  }
 }
 
 export async function syncAllFeeds(ctx) {

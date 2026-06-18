@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS feeds (
   author TEXT,
   description TEXT,
   artwork_url TEXT,
+  artwork_path TEXT,
+  artwork_mime TEXT,
   last_synced_at INTEGER,
   last_etag TEXT,
   last_modified TEXT,
@@ -27,6 +29,8 @@ CREATE TABLE IF NOT EXISTS episodes (
   duration_seconds REAL,
   pub_date INTEGER,
   artwork_url TEXT,
+  artwork_path TEXT,
+  artwork_mime TEXT,
   chapters_status TEXT NOT NULL DEFAULT 'pending',
   chapters_error TEXT,
   audio_available INTEGER NOT NULL DEFAULT 1,
@@ -34,6 +38,7 @@ CREATE TABLE IF NOT EXISTS episodes (
   played INTEGER NOT NULL DEFAULT 0,
   played_at INTEGER,
   last_played_at INTEGER,
+  position_client_ts INTEGER,
   created_at INTEGER NOT NULL,
   UNIQUE(feed_id, guid)
 );

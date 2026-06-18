@@ -5,6 +5,17 @@ import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from '../util/log.js';
 
+// Rewrite a feed row so the client never sees the remote artwork URL: drop
+// it and substitute the cached server-relative path. Returns null when the
+// image hasn't been cached yet so the client falls back to its local icon.
+function privatizeFeed(f) {
+  if (!f) return f;
+  f.artwork_url = f.artwork_path ? `artwork/feed/${f.id}` : null;
+  delete f.artwork_path;
+  delete f.artwork_mime;
+  return f;
+}
+
 export function mountFeedRoutes(api, { db, dataDir }) {
   api.get('/feeds', (req, res) => {
     const rows = db.prepare(`
@@ -14,6 +25,7 @@ export function mountFeedRoutes(api, { db, dataDir }) {
       FROM feeds f
       ORDER BY LOWER(f.title) ASC
     `).all();
+    for (const r of rows) privatizeFeed(r);
     res.json({ feeds: rows });
   });
 
@@ -32,7 +44,7 @@ export function mountFeedRoutes(api, { db, dataDir }) {
       const result = await syncFeedById({ db, dataDir }, id);
       for (const epId of result.newEpisodeIds) enqueueExtraction(epId);
       const feed = db.prepare('SELECT * FROM feeds WHERE id = ?').get(id);
-      res.status(201).json({ feed, newEpisodes: result.newEpisodeIds.length });
+      res.status(201).json({ feed: privatizeFeed(feed), newEpisodes: result.newEpisodeIds.length });
     } catch (e) {
       log.error('initial sync failed', e);
       db.prepare('DELETE FROM feeds WHERE id = ?').run(id);
@@ -42,8 +54,24 @@ export function mountFeedRoutes(api, { db, dataDir }) {
 
   api.delete('/feeds/:id', (req, res) => {
     const id = Number(req.params.id);
+    // Collect cached artwork files to delete BEFORE the DELETE so we still
+    // know which episodes belonged to the feed.
+    const epRows = db.prepare(
+      'SELECT id, artwork_path FROM episodes WHERE feed_id = ?'
+    ).all(id);
+    const feedRow = db.prepare(
+      'SELECT artwork_path FROM feeds WHERE id = ?'
+    ).get(id);
+
     const ok = db.prepare('DELETE FROM feeds WHERE id = ?').run(id);
-    try { rmSync(join(dataDir, 'artwork', String(id)), { recursive: true, force: true }); } catch {}
+
+    const rm = (p) => { if (p) { try { rmSync(p, { recursive: true, force: true }); } catch {} } };
+    if (feedRow && feedRow.artwork_path) rm(join(dataDir, 'artwork', feedRow.artwork_path));
+    for (const ep of epRows) {
+      if (ep.artwork_path) rm(join(dataDir, 'artwork', ep.artwork_path));
+      // Per-chapter APIC dump dir keyed by episode id.
+      rm(join(dataDir, 'artwork', String(ep.id)));
+    }
     res.json({ deleted: ok.changes });
   });
 

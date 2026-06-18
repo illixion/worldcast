@@ -31,11 +31,28 @@ function isVideoEpisode(ep) {
   return /\.(m4v|mov|webm)(\?|#|$)/.test(url);
 }
 
+// Replace remote artwork URLs with our server-relative cached paths. The
+// client never sees the upstream URL, so the podcast host can't observe
+// when/whether the user views any episode. Returns null if the image hasn't
+// been cached yet (the client already falls back to a bundled icon).
+function privatizeArtwork(ep) {
+  // Episode-level art: cached when artwork_path is set; otherwise fall back
+  // to the feed-level art (which the /artwork/episode/:id route mirrors).
+  const epHasOwn = ep.artwork_path != null;
+  const feedHasOwn = ep.feed_artwork_path != null;
+  ep.artwork_url = (epHasOwn || feedHasOwn) ? `artwork/episode/${ep.id}` : null;
+  ep.feed_artwork_url = feedHasOwn ? `artwork/feed/${ep.feed_id}` : null;
+  delete ep.artwork_path;
+  delete ep.artwork_mime;
+  delete ep.feed_artwork_path;
+}
+
 // Decorate a DB row for the client: virtualize audio_url and stamp is_video.
 function decorate(ep) {
   if (!ep) return ep;
   ep.is_video = isVideoEpisode(ep) ? 1 : 0;
   ep.audio_url = publicAudioUrl(ep);
+  privatizeArtwork(ep);
   return ep;
 }
 
@@ -56,9 +73,9 @@ export function mountEpisodeRoutes(api, { db }) {
     const rows = db.prepare(`
       SELECT
         e.id, e.feed_id, e.guid, e.title, e.description, e.audio_url, e.audio_type,
-        e.duration_seconds, e.pub_date, e.artwork_url,
+        e.duration_seconds, e.pub_date, e.artwork_url, e.artwork_path,
         e.chapters_status, e.audio_available, e.position_seconds, e.played, e.played_at,
-        f.title AS feed_title, f.artwork_url AS feed_artwork_url,
+        f.title AS feed_title, f.artwork_url AS feed_artwork_url, f.artwork_path AS feed_artwork_path, f.artwork_path AS feed_artwork_path,
         (SELECT COUNT(*) FROM chapters c WHERE c.episode_id = e.id) AS chapter_count
       FROM episodes e
       JOIN feeds f ON f.id = e.feed_id
@@ -78,8 +95,8 @@ export function mountEpisodeRoutes(api, { db }) {
     const rows = db.prepare(`
       SELECT
         e.id, e.feed_id, e.title, e.audio_url, e.audio_type, e.duration_seconds, e.pub_date,
-        e.artwork_url, e.audio_available, e.position_seconds, e.played, e.last_played_at,
-        f.title AS feed_title, f.artwork_url AS feed_artwork_url,
+        e.artwork_url, e.artwork_path, e.audio_available, e.position_seconds, e.played, e.last_played_at,
+        f.title AS feed_title, f.artwork_url AS feed_artwork_url, f.artwork_path AS feed_artwork_path, f.artwork_path AS feed_artwork_path,
         (SELECT COUNT(*) FROM chapters c WHERE c.episode_id = e.id) AS chapter_count
       FROM episodes e
       JOIN feeds f ON f.id = e.feed_id
@@ -96,8 +113,8 @@ export function mountEpisodeRoutes(api, { db }) {
     const row = db.prepare(`
       SELECT
         e.id, e.feed_id, e.title, e.audio_url, e.audio_type, e.duration_seconds, e.pub_date,
-        e.artwork_url, e.audio_available,
-        f.title AS feed_title, f.artwork_url AS feed_artwork_url
+        e.artwork_url, e.artwork_path, e.audio_available,
+        f.title AS feed_title, f.artwork_url AS feed_artwork_url, f.artwork_path AS feed_artwork_path
       FROM episodes e
       JOIN feeds f ON f.id = e.feed_id
       WHERE e.played = 0
@@ -116,7 +133,7 @@ export function mountEpisodeRoutes(api, { db }) {
     const episode = db.prepare(`
       SELECT
         e.*,
-        f.title AS feed_title, f.artwork_url AS feed_artwork_url
+        f.title AS feed_title, f.artwork_url AS feed_artwork_url, f.artwork_path AS feed_artwork_path
       FROM episodes e JOIN feeds f ON f.id = e.feed_id
       WHERE e.id = ?
     `).get(id);
@@ -136,11 +153,23 @@ export function mountEpisodeRoutes(api, { db }) {
     const body = readJsonBody(req);
     const pos = Number(body.position);
     if (!Number.isFinite(pos) || pos < 0) return res.status(400).json({ error: 'invalid position' });
-    const ep = db.prepare('SELECT id, duration_seconds, played FROM episodes WHERE id = ?').get(id);
+    // Client clock (epoch ms) when this position was observed. Optional for
+    // backward compat; when present it orders writes across devices/beacons.
+    const clientTs = Number(body.client_ts);
+    const hasTs = Number.isFinite(clientTs) && clientTs > 0;
+    const ep = db.prepare('SELECT id, duration_seconds, played, position_seconds, position_client_ts FROM episodes WHERE id = ?').get(id);
     if (!ep) return res.status(404).json({ error: 'not found' });
+    // Reject stale/out-of-order writes: a beacon that was observed strictly
+    // before the position we already have (e.g. device A's backgrounding
+    // beacon arriving after device B advanced past it) must not clobber. Equal
+    // timestamps fall through to last-write-wins, which is harmless.
+    if (hasTs && ep.position_client_ts != null && clientTs < ep.position_client_ts) {
+      return res.json({ ok: true, position: ep.position_seconds, stale: true });
+    }
     const dur = ep.duration_seconds || 0;
     const clamped = dur > 0 ? Math.min(pos, dur + 5) : pos;
-    db.prepare('UPDATE episodes SET position_seconds = ?, last_played_at = ? WHERE id = ?').run(clamped, now(), id);
+    db.prepare('UPDATE episodes SET position_seconds = ?, last_played_at = ?, position_client_ts = ? WHERE id = ?')
+      .run(clamped, now(), hasTs ? clientTs : ep.position_client_ts, id);
     res.json({ ok: true, position: clamped });
   });
 
