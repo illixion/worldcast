@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "description": "Single-user Safari PWA podcast listener with synced playback state and ID3 chapter support",
+  "author": "Illixion",
+  "license": "MIT",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
