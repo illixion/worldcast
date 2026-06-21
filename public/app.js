@@ -253,6 +253,9 @@ class Player {
     // would compete with the video for layout space.
     if (artEl && artSrc && !this.episode.is_video) artEl.src = artSrc;
     if (miniArtEl && artSrc) miniArtEl.src = artSrc;
+    // Ambient color wash behind the player sheet, driven by current artwork.
+    const glow = $('#playerGlow');
+    if (glow && artSrc) glow.style.backgroundImage = `url("${artSrc}")`;
     if (miniTitle) miniTitle.textContent = (ch && ch.title) || this.episode.title || '—';
     if (miniMeta) miniMeta.textContent = this.episode.feed_title || '';
     this._highlightChapterRow(idx);
@@ -280,8 +283,8 @@ class Player {
 
   _onPlay() {
     this._intendPlaying = true;
-    $('#playBtn').textContent = 'Pause';
-    $('#miniPlayBtn').textContent = '❚❚';
+    // Play/pause glyphs are SVGs toggled by this class (see styles.css).
+    document.body.classList.add('is-playing');
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
     this._updatePositionState();
     if (!this.positionInterval) {
@@ -291,8 +294,7 @@ class Player {
 
   _onPause() {
     this._intendPlaying = false;
-    $('#playBtn').textContent = 'Play';
-    $('#miniPlayBtn').textContent = '▶';
+    document.body.classList.remove('is-playing');
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
     if (this.positionInterval) { clearInterval(this.positionInterval); this.positionInterval = null; }
     this._pushPosition();
@@ -484,6 +486,9 @@ function showView(id) {
   $$('.view').forEach(v => v.classList.toggle('active', v.id === id));
   $('#navLibrary').classList.toggle('active', id !== 'playerView');
   $('#navNowPlaying').classList.toggle('active', id === 'playerView');
+  // Exposed for view-scoped CSS (e.g. hiding the mini-player under the
+  // full-screen player sheet).
+  document.body.dataset.view = id;
 }
 
 // Navigate to a view, pushing a new history entry unless we're already on it.
@@ -990,6 +995,11 @@ let player;
   });
   $('#backFromDetails').addEventListener('click', () => {
     if (history.state && history.state.view === 'detailsView') history.back();
+    else navigate('libraryView');
+  });
+  // Dismiss the full-screen player sheet like the back button.
+  $('#playerClose').addEventListener('click', () => {
+    if (history.state && history.state.view === 'playerView') history.back();
     else navigate('libraryView');
   });
   const openCurrentDetails = () => {
