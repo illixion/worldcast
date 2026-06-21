@@ -854,6 +854,48 @@ body.is-playing #miniPlayBtn .ic-pause { display: block; }
 /* The player sheet covers the viewport; keep the mini bar out of the way. */
 body[data-view="playerView"] .mini-player { display: none; }
 
+/* ---------- shuffle FAB (floats above the mini-player, library only) ---------- */
+
+.shuffle-fab {
+  display: none;
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--sab) + var(--tabbar-h) + 22px);
+  z-index: 43;
+  width: calc(100% - 28px);
+  max-width: 440px;
+  height: 54px;
+  border-radius: 18px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  /* transparent-leaning glass: you can see content through it */
+  background: rgba(22,22,28,0.4);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-brd);
+  box-shadow: var(--glass-shadow);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  transition: bottom .3s var(--ease), background .2s var(--ease), transform .12s var(--ease);
+}
+body[data-view="libraryView"] .shuffle-fab { display: flex; }
+.shuffle-fab .ic { width: 22px; height: 22px; color: var(--accent); }
+.shuffle-fab:active { background: var(--accent-soft); transform: translateX(-50%) scale(0.98); }
+.shuffle-fab:disabled { opacity: 0.5; }
+
+/* lift above the mini-player whenever one is showing */
+body:has(.mini-player:not([hidden])) .shuffle-fab {
+  bottom: calc(var(--sab) + var(--tabbar-h) + var(--mini-h) + 30px);
+}
+/* and give the library's scroll room to clear the floating shuffle pill */
+body[data-view="libraryView"] main {
+  padding-bottom: calc(var(--mini-h) + var(--tabbar-h) + var(--sab) + 104px);
+}
+
 /* ---------- add-feed dialog ---------- */
 
 .dialog {

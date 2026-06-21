@@ -12,7 +12,7 @@
 <title>Worldcast</title>
 <link rel="stylesheet" href="styles.css">
 </head>
-<body>
+<body data-view="libraryView">
 
 <header class="app-header">
   <h1>Worldcast</h1>
@@ -25,7 +25,6 @@
   <section id="libraryView" class="view active">
     <div class="library-actions">
       <button id="addFeedBtn" class="primary">+ Add Feed</button>
-      <button id="playRandomBtn" class="ghost-btn" title="Play a random never-played episode">🎲 Random</button>
       <span id="syncStatus" class="muted small"></span>
     </div>
 
@@ -143,6 +142,15 @@
     <svg class="ic ic-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="3.6" height="14" rx="1.3"/><rect x="13.9" y="5" width="3.6" height="14" rx="1.3"/></svg>
   </button>
 </aside>
+
+<!-- SHUFFLE — floating random-play button, library view only (shown via
+     body[data-view] in CSS). Keeps #playRandomBtn so app.js binding stands. -->
+<button id="playRandomBtn" class="shuffle-fab" type="button" title="Play a random never-played episode">
+  <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>
+  </svg>
+  Shuffle
+</button>
 
 <!-- BOTTOM TAB BAR — primary nav -->
 <nav class="tab-bar glass" aria-label="Primary">
