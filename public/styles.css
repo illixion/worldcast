@@ -78,7 +78,11 @@ body::before {
   pointer-events: none;
 }
 
-body { padding-top: var(--sat); }
+/* No top padding on the body: the safe-area inset is absorbed by the sticky
+   header itself (see .app-header) so its background covers the status-bar /
+   Dynamic Island region. Padding here would instead leave a transparent gap
+   that scrolled content bleeds through in installed-PWA (black-translucent)
+   mode — invisible in a normal Safari tab where the inset is 0. */
 
 button, input {
   font-family: inherit;
@@ -110,14 +114,17 @@ svg.ic { width: 1em; height: 1em; display: block; fill: currentColor; }
 
 .app-header {
   position: sticky;
-  top: var(--sat);
+  top: 0;
   z-index: 50;
-  height: var(--header-h);
+  /* Header grows by the safe-area inset and pads its content down past the
+     status bar; box-sizing:border-box keeps the content row var(--header-h)
+     tall and vertically centered below the inset. */
+  height: calc(var(--header-h) + var(--sat));
+  padding: var(--sat) 18px 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
-  background: linear-gradient(180deg, rgba(6,6,8,0.82), rgba(6,6,8,0.4));
+  background: linear-gradient(180deg, rgba(6,6,8,0.92), rgba(6,6,8,0.5));
   -webkit-backdrop-filter: saturate(180%) blur(18px);
   backdrop-filter: saturate(180%) blur(18px);
 }
