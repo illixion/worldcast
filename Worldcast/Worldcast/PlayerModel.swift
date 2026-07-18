@@ -118,6 +118,21 @@ final class PlayerModel {
 
     func toggle() { isPlaying ? pause() : play() }
 
+    /// Tear down playback entirely (e.g. the library was erased).
+    func stop() {
+        intendPlaying = false
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        episode = nil
+        chapters = []
+        currentChapterIndex = -1
+        isPlaying = false
+        currentTime = 0
+        duration = 0
+        statusMessage = nil
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+
     func seek(to seconds: Double) {
         let dur = effectiveDuration
         let target = max(0, dur > 0 ? min(seconds, dur) : seconds)

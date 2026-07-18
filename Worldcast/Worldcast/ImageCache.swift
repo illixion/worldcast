@@ -46,6 +46,13 @@ final class ImageCache {
         }
     }
 
+    /// Drop everything (memory + disk). Used when the library is erased.
+    func clear() {
+        memory.removeAllObjects()
+        inFlight = [:]
+        try? FileManager.default.removeItem(at: Self.directory)
+    }
+
     private nonisolated static func load(_ url: URL) async -> UIImage? {
         if url.isFileURL {
             return UIImage(contentsOfFile: url.path)

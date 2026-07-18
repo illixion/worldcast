@@ -160,6 +160,18 @@ final class LibraryStore {
         }
     }
 
+    /// Full local wipe — used when disconnecting from a server so none of
+    /// the synced library lingers. Removes feeds, episodes, downloaded audio
+    /// and leaves the store empty (standalone, no subscriptions).
+    func eraseAllData() {
+        try? FileManager.default.removeItem(at: AppPaths.downloadsDirectory)
+        episodes = []
+        feeds = []
+        syncStatusText = ""
+        lastError = nil
+        save()
+    }
+
     // MARK: - Feed management
 
     func addFeed(urlString: String) async throws {

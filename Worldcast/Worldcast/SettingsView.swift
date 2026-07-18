@@ -7,12 +7,14 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(LibraryStore.self) private var library
+    @Environment(PlayerModel.self) private var player
     @Environment(\.dismiss) private var dismiss
     @AppStorage(BackendAPI.baseURLDefaultsKey) private var serverBaseURL = ""
 
     @State private var draft = ""
     @State private var testResult: String?
     @State private var testing = false
+    @State private var confirmDisconnect = false
 
     var body: some View {
         NavigationStack {
@@ -49,12 +51,10 @@ struct SettingsView: View {
                 if !serverBaseURL.isEmpty {
                     Section {
                         Button("Disconnect server", role: .destructive) {
-                            serverBaseURL = ""
-                            draft = ""
-                            testResult = nil
+                            confirmDisconnect = true
                         }
                     } footer: {
-                        Text("Keeps your local library and downloads; stops syncing.")
+                        Text("Stops syncing and erases the synced library, downloads and cached artwork from this device.")
                     }
                 }
 
@@ -76,7 +76,25 @@ struct SettingsView: View {
                 }
             }
             .onAppear { draft = serverBaseURL }
+            .confirmationDialog(
+                "Disconnect and erase library?",
+                isPresented: $confirmDisconnect,
+                titleVisibility: .visible
+            ) {
+                Button("Disconnect & Erase", role: .destructive) { disconnect() }
+            } message: {
+                Text("Removes all feeds, episodes, downloads and cached artwork from this device. The server keeps its data.")
+            }
         }
+    }
+
+    private func disconnect() {
+        serverBaseURL = ""
+        draft = ""
+        testResult = nil
+        player.stop()
+        library.eraseAllData()
+        ImageCache.shared.clear()
     }
 
     private var downloadsSummary: String {
