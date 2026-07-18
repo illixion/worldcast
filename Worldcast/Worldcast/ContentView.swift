@@ -15,10 +15,25 @@ struct ContentView: View {
         // empty content still renders a blank pill. Hidden on the Now Playing
         // tab: the full player has its own transport.
         tabs
+#if os(visionOS)
+            // No tabViewBottomAccessory on visionOS (tabs live in the side
+            // ornament) — float the mini player in a glass capsule instead.
+            .safeAreaInset(edge: .bottom) {
+                if player.hasEpisode && selectedTab != .nowPlaying {
+                    MiniPlayerView()
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .glassBackgroundEffect(in: .capsule)
+                        .onTapGesture { selectedTab = .nowPlaying }
+                        .padding(.bottom, 12)
+                }
+            }
+#else
             .tabViewBottomAccessory(isEnabled: player.hasEpisode && selectedTab != .nowPlaying) {
                 MiniPlayerView()
                     .onTapGesture { selectedTab = .nowPlaying }
             }
+#endif
             .onChange(of: player.loadGeneration) {
                 // A new episode started (tap on play anywhere) — surface the
                 // player, like the web app's navigate('playerView') on load.
@@ -38,7 +53,9 @@ struct ContentView: View {
                 PlayerView()
             }
         }
+#if !os(visionOS)
         .tabBarMinimizeBehavior(.onScrollDown)
+#endif
     }
 }
 

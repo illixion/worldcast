@@ -43,7 +43,9 @@ final class PlayerModel {
     init() {
         let saved = UserDefaults.standard.double(forKey: Self.speedKey)
         playbackRate = Self.speedSteps.contains(saved) ? saved : 1
+#if !os(visionOS)
         player.allowsExternalPlayback = true
+#endif
         configureRemoteCommands()
         installTimeObserver()
         installLifecycleObservers()
