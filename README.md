@@ -91,6 +91,14 @@ Removing an XML file does **not** auto-delete the feed; episodes, positions,
 and played flags are preserved (same as HTTP feeds that 404). Delete via the
 UI if you want it gone.
 
+### Native app Documents library
+
+The native iPad/iPhone app exposes its Documents directory in Files and Finder
+file sharing. Drop MP3s into `Worldcast/<podcast>/<episode>.mp3`; each podcast
+folder appears as a local feed on the next foreground refresh. Local MP3 ID3
+`CHAP` frames provide chapter navigation and lock-screen chapter titles without
+requiring a server.
+
 ## Project layout
 
 ```

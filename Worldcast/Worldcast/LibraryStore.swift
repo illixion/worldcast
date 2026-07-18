@@ -15,6 +15,9 @@ nonisolated enum AppPaths {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
+    static var documentsDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
 }
 
 @Observable
@@ -102,6 +105,9 @@ final class LibraryStore {
     /// falls back to a placeholder.
     func resolveURL(_ raw: String?) -> URL? {
         guard let raw, !raw.isEmpty else { return nil }
+        if raw.lowercased().hasPrefix("file://") {
+            return URL(string: raw)
+        }
         if raw.lowercased().hasPrefix("http://") || raw.lowercased().hasPrefix("https://") {
             return URL(string: raw)
         }
@@ -221,6 +227,7 @@ final class LibraryStore {
         isRefreshing = true
         defer { isRefreshing = false }
         lastError = nil
+        importDocumentsLibrary()
         do {
             if backendConfigured {
                 if triggerServerSync {
@@ -273,7 +280,8 @@ final class LibraryStore {
         var serverFeeds = try await api.feeds()
         let serverURLs = Set(serverFeeds.map(\.url))
         var adoptedAny = false
-        for feed in feeds where feed.serverId == nil && !serverURLs.contains(feed.url) {
+        for feed in feeds where !feed.isDocumentsLibrary
+            && feed.serverId == nil && !serverURLs.contains(feed.url) {
             do { _ = try await api.addFeed(url: feed.url); adoptedAny = true }
             catch { /* e.g. server can't reach it; stays local-only */ }
         }
@@ -427,6 +435,13 @@ final class LibraryStore {
         guard var e = episode(id: episodeId) else { return nil }
         if !e.chapters.isEmpty { return e }
 
+        if let raw = e.audioURL, let localURL = URL(string: raw), localURL.isFileURL {
+            e.chapters = LocalID3Chapters.read(from: localURL)
+            e.chapterSource = .localID3
+            update(e)
+            return e
+        }
+
         if backendConfigured, let sid = e.serverId {
             if let detail = try? await api.episodeDetail(id: sid) {
                 if let d = detail.episode.description, !d.isEmpty { e.episodeDescription = d }
@@ -444,6 +459,7 @@ final class LibraryStore {
                     update(e)
                     return e
                 }
+
             }
         }
         if let raw = e.chaptersJSONURL, let url = URL(string: raw) {
@@ -454,5 +470,74 @@ final class LibraryStore {
         }
         update(e)
         return e
+    }
+
+    // MARK: - Documents library
+
+    /// Imports direct MP3 children of Documents/<podcast>/ as local feeds.
+    /// Files remains the source of truth: deleting a podcast folder removes
+    /// its local feed at the next foreground refresh.
+    private func importDocumentsLibrary() {
+        let scanned = LocalDocumentsLibrary.scan()
+        let activeURLs = Set(scanned.map(\.feedURL))
+        var changed = false
+
+        for podcast in scanned {
+            let feedIndex = feeds.firstIndex { $0.url == podcast.feedURL }
+            let feedId: UUID
+            if let feedIndex {
+                feedId = feeds[feedIndex].id
+                if feeds[feedIndex].title != podcast.title {
+                    feeds[feedIndex].title = podcast.title
+                    changed = true
+                }
+            } else {
+                var feed = StoredFeed(url: podcast.feedURL)
+                feed.title = podcast.title
+                feeds.append(feed)
+                feedId = feed.id
+                changed = true
+            }
+
+            for source in podcast.episodes {
+                if let index = episodes.firstIndex(where: {
+                    $0.feedId == feedId && $0.guid == source.guid
+                }) {
+                    var episode = episodes[index]
+                    let sourceURL = source.fileURL.absoluteString
+                    if episode.title != source.title
+                        || episode.audioURL != sourceURL
+                        || episode.audioType != "audio/mpeg"
+                        || !episode.audioAvailable
+                        || episode.pubDateMs != source.modifiedAtMs {
+                        episode.title = source.title
+                        episode.audioURL = sourceURL
+                        episode.audioType = "audio/mpeg"
+                        episode.audioAvailable = true
+                        episode.pubDateMs = source.modifiedAtMs
+                        episodes[index] = episode
+                        changed = true
+                    }
+                } else {
+                    var episode = StoredEpisode(feedId: feedId, guid: source.guid, title: source.title)
+                    episode.audioURL = source.fileURL.absoluteString
+                    episode.audioType = "audio/mpeg"
+                    episode.audioAvailable = true
+                    episode.pubDateMs = source.modifiedAtMs
+                    episodes.append(episode)
+                    changed = true
+                }
+            }
+        }
+
+        let removed = feeds.filter {
+            $0.isDocumentsLibrary && !activeURLs.contains($0.url)
+        }
+        for feed in removed {
+            episodes.removeAll { $0.feedId == feed.id }
+            feeds.removeAll { $0.id == feed.id }
+            changed = true
+        }
+        if changed { save() }
     }
 }

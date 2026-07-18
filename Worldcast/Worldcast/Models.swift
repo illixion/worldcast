@@ -23,6 +23,10 @@ struct StoredFeed: Codable, Identifiable, Hashable {
         if let title, !title.isEmpty { return title }
         return url
     }
+
+    var isDocumentsLibrary: Bool {
+        url.hasPrefix(LocalDocumentsLibrary.feedURLPrefix)
+    }
 }
 
 struct StoredChapter: Codable, Identifiable, Hashable {
@@ -38,6 +42,7 @@ enum ChapterSource: String, Codable {
     case none        // not fetched yet / episode has none
     case backend     // server-extracted ID3 CHAP
     case json        // Podcasting 2.0 podcast:chapters
+    case localID3    // ID3 CHAP frames from a Documents-library MP3
 }
 
 struct StoredEpisode: Codable, Identifiable, Hashable {
