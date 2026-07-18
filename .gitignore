@@ -3,3 +3,6 @@ data/
 .env
 .DS_Store
 *.log
+scripts/build-signing.conf
+build/
+xcuserdata/
