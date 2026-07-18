@@ -40,6 +40,15 @@ function migrate(db) {
   if (!epHas('position_client_ts')) {
     db.exec(`ALTER TABLE episodes ADD COLUMN position_client_ts INTEGER`);
   }
+  // On-demand chapters for HTTP episodes: anything still queued ('pending')
+  // whose audio lives on a remote host moves to 'deferred' — extracted the
+  // first time its detail is requested instead of pre-crawled. Idempotent:
+  // after the first run no row is both 'pending' and non-file://.
+  db.exec(`
+    UPDATE episodes SET chapters_status = 'deferred'
+    WHERE chapters_status = 'pending' AND audio_url NOT LIKE 'file://%'
+  `);
+
   const fCols = db.prepare("PRAGMA table_info(feeds)").all();
   const fHas = (name) => fCols.some(c => c.name === name);
   if (!fHas('artwork_path')) {

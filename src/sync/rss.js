@@ -119,13 +119,17 @@ export async function syncFeedById(ctx, feedId) {
     feedId
   );
 
+  // chapters_status: local-library episodes are pre-extracted ('pending' →
+  // picked up by the scheduler queue); HTTP episodes are 'deferred' and only
+  // extracted on-demand the first time their detail is requested, so a feed
+  // add/sync never fans out Range requests to the podcast host.
   const insert = db.prepare(`
     INSERT INTO episodes
       (feed_id, guid, title, description, audio_url, audio_length, audio_type,
        duration_seconds, pub_date, artwork_url, chapters_status, created_at)
     VALUES
       (@feed_id, @guid, @title, @description, @audio_url, @audio_length, @audio_type,
-       @duration_seconds, @pub_date, @artwork_url, 'pending', @created_at)
+       @duration_seconds, @pub_date, @artwork_url, @chapters_status, @created_at)
     ON CONFLICT(feed_id, guid) DO NOTHING
   `);
 
@@ -150,6 +154,7 @@ export async function syncFeedById(ctx, feedId) {
         duration_seconds: parseItunesDuration(item.itunesDuration),
         pub_date: pub_date || null,
         artwork_url: extractItemArtwork(item, feedArtwork),
+        chapters_status: audio_url.startsWith('file://') ? 'pending' : 'deferred',
         created_at: now()
       };
       const info = insert.run(row);

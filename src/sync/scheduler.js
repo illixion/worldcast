@@ -13,10 +13,44 @@ let workerCount = 0;
 const MAX_CONCURRENCY = 2;
 let ctxRef = null;
 
-export function enqueueExtraction(episodeId) {
+/**
+ * Queue an episode for background chapter extraction. Only file:// episodes
+ * are pre-extracted — HTTP episodes stay 'deferred' and get extracted
+ * on-demand (see extractOnDemand), so we never fan out Range requests to the
+ * podcast host during sync. Pass { force: true } for explicit user actions
+ * (rechapter) that should extract regardless of scheme.
+ */
+export function enqueueExtraction(episodeId, { force = false } = {}) {
   if (inFlight.has(episodeId) || queue.includes(episodeId)) return;
+  if (!force && ctxRef) {
+    const ep = ctxRef.db.prepare('SELECT audio_url FROM episodes WHERE id = ?').get(episodeId);
+    if (!ep || !ep.audio_url || !ep.audio_url.startsWith('file://')) return;
+  }
   queue.push(episodeId);
   spawnWorkers();
+}
+
+// Deduped on-demand extraction for a single episode (HTTP or local). Used by
+// the episode-detail route the first time a 'deferred'/'pending' episode is
+// opened. Concurrent requests for the same episode share one extraction.
+const onDemand = new Map();
+export function extractOnDemand(episodeId) {
+  const existing = onDemand.get(episodeId);
+  if (existing) return existing;
+  const p = (async () => {
+    // If a background worker is already on it, wait for it instead.
+    while (inFlight.has(episodeId)) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+    inFlight.add(episodeId);
+    try {
+      await extractChaptersForEpisode(ctxRef, episodeId);
+    } finally {
+      inFlight.delete(episodeId);
+    }
+  })().finally(() => onDemand.delete(episodeId));
+  onDemand.set(episodeId, p);
+  return p;
 }
 
 function spawnWorkers() {
@@ -141,9 +175,12 @@ export async function runFullSync(ctx) {
 export function startScheduler({ db, dataDir, intervalMs }) {
   ctxRef = { db, dataDir };
 
-  // Re-queue any previously-pending episodes (server may have crashed mid-extract).
+  // Re-queue any previously-pending episodes (server may have crashed
+  // mid-extract). Local-library only — HTTP episodes are 'deferred'.
   const pending = db.prepare(
-    `SELECT id FROM episodes WHERE chapters_status = 'pending' ORDER BY id ASC LIMIT 500`
+    `SELECT id FROM episodes
+     WHERE chapters_status = 'pending' AND audio_url LIKE 'file://%'
+     ORDER BY id ASC LIMIT 500`
   ).all();
   for (const row of pending) enqueueExtraction(row.id);
   if (pending.length > 0) log.info(`scheduler: re-queued ${pending.length} pending chapter extraction(s)`);

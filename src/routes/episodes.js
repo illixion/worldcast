@@ -1,5 +1,5 @@
 import { now } from '../db.js';
-import { enqueueExtraction } from '../sync/scheduler.js';
+import { enqueueExtraction, extractOnDemand } from '../sync/scheduler.js';
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
 
@@ -75,6 +75,7 @@ export function mountEpisodeRoutes(api, { db }) {
         e.id, e.feed_id, e.guid, e.title, e.description, e.audio_url, e.audio_type,
         e.duration_seconds, e.pub_date, e.artwork_url, e.artwork_path,
         e.chapters_status, e.audio_available, e.position_seconds, e.played, e.played_at,
+        e.last_played_at,
         f.title AS feed_title, f.artwork_url AS feed_artwork_url, f.artwork_path AS feed_artwork_path, f.artwork_path AS feed_artwork_path,
         (SELECT COUNT(*) FROM chapters c WHERE c.episode_id = e.id) AS chapter_count
       FROM episodes e
@@ -128,16 +129,29 @@ export function mountEpisodeRoutes(api, { db }) {
     res.json({ episode: row });
   });
 
-  api.get('/episodes/:id', (req, res) => {
+  api.get('/episodes/:id', async (req, res) => {
     const id = Number(req.params.id);
-    const episode = db.prepare(`
+    const fetchRow = () => db.prepare(`
       SELECT
         e.*,
         f.title AS feed_title, f.artwork_url AS feed_artwork_url, f.artwork_path AS feed_artwork_path
       FROM episodes e JOIN feeds f ON f.id = e.feed_id
       WHERE e.id = ?
     `).get(id);
+    let episode = fetchRow();
     if (!episode) return res.status(404).json({ error: 'not found' });
+
+    // First-open extraction: 'deferred' (HTTP, never attempted) and 'pending'
+    // (local, not yet reached by the queue) episodes get their chapters
+    // extracted now, so the response the player builds itself from already
+    // carries them. Bounded — on timeout the extraction keeps running in the
+    // background and the next request sees the result.
+    if (episode.audio_available === 1 &&
+        (episode.chapters_status === 'deferred' || episode.chapters_status === 'pending')) {
+      const timeout = new Promise(r => setTimeout(r, 15000));
+      try { await Promise.race([extractOnDemand(id), timeout]); } catch {}
+      episode = fetchRow() || episode;
+    }
     decorate(episode);
 
     const chapters = db.prepare(`
@@ -214,7 +228,8 @@ export function mountEpisodeRoutes(api, { db }) {
     if (!ep) return res.status(404).json({ error: 'not found' });
     db.prepare('DELETE FROM chapters WHERE episode_id = ?').run(id);
     db.prepare('UPDATE episodes SET chapters_status = ?, chapters_error = NULL WHERE id = ?').run('pending', id);
-    enqueueExtraction(id);
+    // Explicit user action — extract even for HTTP audio.
+    enqueueExtraction(id, { force: true });
     res.json({ ok: true });
   });
 }

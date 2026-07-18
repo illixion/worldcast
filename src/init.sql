@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS episodes (
   artwork_url TEXT,
   artwork_path TEXT,
   artwork_mime TEXT,
+  -- 'pending'  = queued for pre-extraction (file:// audio only)
+  -- 'deferred' = HTTP audio; extracted on-demand at first detail request
+  -- 'done' / 'none' / 'error' = extraction attempted
   chapters_status TEXT NOT NULL DEFAULT 'pending',
   chapters_error TEXT,
   audio_available INTEGER NOT NULL DEFAULT 1,
