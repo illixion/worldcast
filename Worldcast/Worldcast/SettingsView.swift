@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var testResult: String?
     @State private var testing = false
     @State private var confirmDisconnect = false
+    @AppStorage(WatchConfigurationSync.enabledKey) private var syncServerToWatch = false
 
     var body: some View {
         NavigationStack {
@@ -42,13 +43,19 @@ struct SettingsView: View {
                 } header: {
                     Text("Worldcast server")
                 } footer: {
-                    Text("Optional. Leave empty to use the app standalone (direct RSS). "
-                         + "The URL includes your secret token as a path segment — treat it "
-                         + "like a password and only use it over trusted transport "
-                         + "(e.g. Tailscale).")
+                    Text(serverFooter)
                 }
 
                 if !serverBaseURL.isEmpty {
+                    Section {
+                        Toggle("Sync server to Apple Watch", isOn: $syncServerToWatch)
+                    } header: {
+                        Text("Apple Watch")
+                    } footer: {
+                        Text("Sends the server URL and its secret token to your paired Apple Watch. "
+                             + "The watch can then connect directly over Wi-Fi or cellular.")
+                    }
+
                     Section {
                         Button("Disconnect server", role: .destructive) {
                             confirmDisconnect = true
@@ -90,6 +97,8 @@ struct SettingsView: View {
 
     private func disconnect() {
         serverBaseURL = ""
+        syncServerToWatch = false
+        WatchConfigurationSync.shared.sendServerURL(nil)
         draft = ""
         testResult = nil
         player.stop()
@@ -103,12 +112,22 @@ struct SettingsView: View {
         let bytes = files.reduce(Int64(0)) { acc, f in
             acc + Int64((try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
+
         return "\(files.count) · " + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private var serverFooter: String {
+        "Optional. Leave empty to use the app standalone (direct RSS). "
+            + "The URL includes your secret token as a path segment — treat it "
+            + "like a password and only use it over trusted transport (e.g. Tailscale)."
     }
 
     private func save() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         serverBaseURL = trimmed
+        if syncServerToWatch {
+            WatchConfigurationSync.shared.sendServerURL(trimmed)
+        }
         dismiss()
         Task { await library.refreshAll() }
     }
