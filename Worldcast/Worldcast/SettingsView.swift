@@ -8,6 +8,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlayerModel.self) private var player
+    @Environment(PlaybackSettings.self) private var settings
     @Environment(\.dismiss) private var dismiss
     @AppStorage(BackendAPI.baseURLDefaultsKey) private var serverBaseURL = ""
 
@@ -20,6 +21,8 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                playbackSection
+
                 Section {
                     TextField("Server URL", text: $draft,
                               prompt: Text(verbatim: "https://host.ts.net/pod/TOKEN/")
@@ -92,6 +95,59 @@ struct SettingsView: View {
             } message: {
                 Text("Removes all feeds, episodes, downloads and cached artwork from this device. The server keeps its data.")
             }
+        }
+    }
+
+    // MARK: - Playback
+
+    @ViewBuilder
+    private var playbackSection: some View {
+        @Bindable var settings = settings
+
+        Section {
+            Picker("Skip back", selection: $settings.skipBackInterval) {
+                ForEach(PlaybackSettings.intervalChoices, id: \.self) { v in
+                    Label(Formatters.interval(v),
+                          systemImage: v.skipSymbolName(forward: false)).tag(v)
+                }
+            }
+            Picker("Skip forward", selection: $settings.skipForwardInterval) {
+                ForEach(PlaybackSettings.intervalChoices, id: \.self) { v in
+                    Label(Formatters.interval(v),
+                          systemImage: v.skipSymbolName(forward: true)).tag(v)
+                }
+            }
+        } header: {
+            Text("Skip intervals")
+        } footer: {
+            Text("Used by the on-screen skip buttons and the lock screen / "
+                 + "CarPlay skip controls.")
+        }
+
+        Section {
+            Picker("Previous / next", selection: $settings.trackCommandAction) {
+                ForEach(PlaybackSettings.TrackCommandAction.allCases) { action in
+                    Text(action.label).tag(action)
+                }
+            }
+            .pickerStyle(.segmented)
+        } header: {
+            Text("Remote track controls")
+        } footer: {
+            Text(trackActionFooter)
+        }
+    }
+
+    private var trackActionFooter: String {
+        switch settings.trackCommandAction {
+        case .chapter:
+            return "AirPods press-twice / press-thrice, CarPlay and the lock "
+                + "screen track buttons jump between chapters. Episodes without "
+                + "chapters fall back to a time skip."
+        case .skip:
+            return "AirPods press-twice / press-thrice, CarPlay and the lock "
+                + "screen track buttons skip back \(Formatters.interval(settings.skipBackInterval)) "
+                + "and forward \(Formatters.interval(settings.skipForwardInterval))."
         }
     }
 

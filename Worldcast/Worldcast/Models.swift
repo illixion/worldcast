@@ -178,6 +178,15 @@ enum Formatters {
             .formatted(date: .abbreviated, time: .omitted)
     }
 
+    /// Skip interval, e.g. `15s` / `1m 30s`. Used in Settings and in the
+    /// remote-command labels.
+    static func interval(_ s: Double) -> String {
+        let total = Int(s.rounded())
+        guard total >= 60 else { return "\(total)s" }
+        let m = total / 60, sec = total % 60
+        return sec == 0 ? "\(m)m" : "\(m)m \(sec)s"
+    }
+
     static func speed(_ r: Double) -> String {
         let s = r == r.rounded() ? String(Int(r)) : String(format: "%.2f", r)
         return s.replacing(/\.?0+$/, with: "") + "×"

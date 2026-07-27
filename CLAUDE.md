@@ -32,10 +32,21 @@ in `public/app.js`. No TypeScript. No test suite yet.
 ## Running / inspecting
 
 ```sh
+./scripts/dev-fixture.sh --start            # dev server + offline chaptered feed
 npm start                                   # production-ish
 SYNC_INTERVAL_MS=999999999 npm start        # disable hourly sync for testing
 sqlite3 data/pcast.db                       # inspect state
 ```
+
+**Use `scripts/dev-fixture.sh` for local work.** `.env` and `data/` are both
+gitignored, so that script is the only committed record of the dev setup. It
+writes a `.env` (token `dev-local-worldcast-testing`, port 8080, hourly sync
+off), downloads a real chaptered MP3 into `data/library/audio/`, and generates
+`data/library/dev-local.xml` — a local feed with one *relative* and one
+*absolute* `file://` enclosure, so a single `POST /api/sync` exercises both
+branches of `resolveEnclosureUrl()` plus the path-safety check. It's idempotent.
+The fixture audio carries 17 ID3 CHAP chapters with APIC artwork, which is what
+makes it usable for testing chapter-boundary lock screen metadata.
 
 Auth: **the URL path is the secret.** The whole app mounts under
 `<BASE_PATH>/<TOKEN>/` — any request whose path doesn't begin with the right

@@ -9,6 +9,7 @@ import UIKit
 struct PlayerView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlayerModel.self) private var player
+    @Environment(PlaybackSettings.self) private var settings
 
     @State private var showDetails = false
     @State private var glowImage: UIImage?
@@ -177,16 +178,20 @@ struct PlayerView: View {
                 Button { player.jumpChapter(-1) } label: {
                     Image(systemName: "backward.end.fill").font(.title3)
                 }
-                Button { player.seekBy(-15) } label: {
-                    Image(systemName: "15.arrow.trianglehead.counterclockwise").font(.title2)
+                Button { player.skipBackward() } label: {
+                    Image(systemName: settings.skipBackInterval.skipSymbolName(forward: false))
+                        .font(.title2)
+                        .contentTransition(.symbolEffect(.replace))
                 }
                 Button { player.toggle() } label: {
                     Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
                         .font(.system(size: 62))
                         .symbolRenderingMode(.hierarchical)
                 }
-                Button { player.seekBy(30) } label: {
-                    Image(systemName: "30.arrow.trianglehead.clockwise").font(.title2)
+                Button { player.skipForward() } label: {
+                    Image(systemName: settings.skipForwardInterval.skipSymbolName(forward: true))
+                        .font(.title2)
+                        .contentTransition(.symbolEffect(.replace))
                 }
                 Button { player.jumpChapter(+1) } label: {
                     Image(systemName: "forward.end.fill").font(.title3)

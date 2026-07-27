@@ -12,6 +12,8 @@ struct WorldcastApp: App {
         let library = LibraryStore()
         let player = PlayerModel()
         let downloads = DownloadManager()
+        WatchConfigurationSync.shared.player = player
+        WatchConfigurationSync.shared.library = library
         WatchConfigurationSync.shared.start()
         WatchConfigurationSync.shared.syncIfEnabled()
         player.library = library
@@ -27,6 +29,7 @@ struct WorldcastApp: App {
                 .environment(library)
                 .environment(player)
                 .environment(downloads)
+                .environment(PlaybackSettings.shared)
         }
     }
 }

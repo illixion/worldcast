@@ -5,11 +5,13 @@ import SwiftUI
 @main
 struct WorldcastWatchApp: App {
     @State private var model = WatchLibrary()
+    @State private var remote = PhoneRemote()
 
     var body: some Scene {
         WindowGroup {
             WatchContentView()
                 .environment(model)
+                .environment(remote)
         }
     }
 }
@@ -110,6 +112,20 @@ final class WatchLibrary {
         await load {
             let response: WatchEpisodesResponse = try await self.request("api/episodes?feed=\(feed.id)&limit=100")
             self.episodes = response.episodes
+        }
+    }
+
+    /// Same request `select(_:)` makes, but returns instead of mutating
+    /// `selectedFeed`/`episodes` — for browsing that shouldn't disturb this
+    /// screen's own local-playback navigation state, e.g. the "On My
+    /// iPhone" remote library browser.
+    func fetchEpisodes(for feed: WatchFeed) async -> [WatchEpisode] {
+        do {
+            let response: WatchEpisodesResponse = try await request("api/episodes?feed=\(feed.id)&limit=100")
+            return response.episodes
+        } catch {
+            errorMessage = error.localizedDescription
+            return []
         }
     }
 
@@ -214,16 +230,10 @@ struct WatchContentView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if !model.isConfigured {
-                    ContentUnavailableView(
-                        "Connect Worldcast",
-                        systemImage: "antenna.radiowaves.left.and.right",
-                        description: Text("Add the server URL, including its secret token path.")
-                    )
-                } else if let feed = model.selectedFeed {
+                if let feed = model.selectedFeed {
                     episodeList(feed)
                 } else {
-                    feedList
+                    rootList
                 }
             }
             .navigationTitle(model.selectedFeed?.title ?? "Worldcast")
@@ -252,15 +262,31 @@ struct WatchContentView: View {
         }
     }
 
-    private var feedList: some View {
-        List(model.feeds) { feed in
-            Button {
-                Task { await model.select(feed) }
-            } label: {
-                VStack(alignment: .leading) {
-                    Text(feed.title ?? "Untitled feed")
-                    if let count = feed.unplayed_count, count > 0 {
-                        Text("\(count) unplayed").foregroundStyle(.secondary)
+    private var rootList: some View {
+        List {
+            Section {
+                NavigationLink {
+                    PhoneRemoteView()
+                } label: {
+                    Label("On My iPhone", systemImage: "iphone")
+                }
+            }
+            Section("Library") {
+                if !model.isConfigured {
+                    Text("Add the server URL, including its secret token path, in Settings.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.feeds) { feed in
+                        Button {
+                            Task { await model.select(feed) }
+                        } label: {
+                            VStack(alignment: .leading) {
+                                Text(feed.title ?? "Untitled feed")
+                                if let count = feed.unplayed_count, count > 0 {
+                                    Text("\(count) unplayed").foregroundStyle(.secondary)
+                                }
+                            }
+                        }
                     }
                 }
             }

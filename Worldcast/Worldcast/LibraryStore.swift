@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 
 nonisolated enum AppPaths {
     static var supportDirectory: URL {
@@ -33,6 +34,9 @@ final class LibraryStore {
     var syncStatusText = ""
     var lastError: String?
 
+    private var isFlushingPositions = false
+    private var flushAgainWhenDone = false
+
     private let api = BackendAPI.shared
 
     var backendConfigured: Bool { api.isConfigured }
@@ -64,6 +68,7 @@ final class LibraryStore {
 
     func feed(id: UUID) -> StoredFeed? { feeds.first { $0.id == id } }
     func episode(id: UUID) -> StoredEpisode? { episodes.first { $0.id == id } }
+    func episode(serverId: Int) -> StoredEpisode? { episodes.first { $0.serverId == serverId } }
 
     func episodes(inFeed feedId: UUID) -> [StoredEpisode] {
         episodes.filter { $0.feedId == feedId }
@@ -143,6 +148,10 @@ final class LibraryStore {
 
     /// Record a locally observed playback position. `push` follows the quiet
     /// contract: only pause / seek / background edges pass true.
+    ///
+    /// The local write (and its `positionDirty` flag) happens synchronously and
+    /// hits disk immediately, so even a suspension or a kill straight after
+    /// this call leaves a durable record to retry from.
     func recordPosition(episodeId: UUID, position: Double, push: Bool) {
         guard var e = episode(id: episodeId) else { return }
         let ts = Date().timeIntervalSince1970 * 1000
@@ -152,17 +161,52 @@ final class LibraryStore {
         e.positionDirty = true
         update(e)
         guard push else { return }
-        if backendConfigured, let sid = e.serverId {
-            let epId = e.id
-            Task {
-                do {
-                    try await BackendAPI.shared.pushPosition(id: sid, position: position, clientTsMs: ts)
-                    if var cur = self.episode(id: epId), cur.positionClientTsMs == ts {
-                        cur.positionDirty = false
-                        self.update(cur)
-                    }
-                } catch { /* stays dirty; retried before next pull */ }
+        flushDirtyPositions()
+    }
+
+    /// Send every dirty position to the server under a background-task
+    /// assertion.
+    ///
+    /// The assertion is the fix for the "paused from the lock screen while
+    /// backgrounded" case: pausing ends the audio playback that was keeping the
+    /// process alive, so without an explicit assertion iOS suspends us within
+    /// moments and the in-flight URLSession request dies before it is sent.
+    /// Flushing *all* dirty positions (not just the one that triggered this)
+    /// also lets a later flush recover anything an earlier suspension cut off.
+    func flushDirtyPositions() {
+        guard backendConfigured else { return }
+        guard episodes.contains(where: { $0.positionDirty && $0.serverId != nil }) else { return }
+        guard !isFlushingPositions else { flushAgainWhenDone = true; return }
+        isFlushingPositions = true
+
+        let assertion = BackgroundAssertion()
+        assertion.id = UIApplication.shared.beginBackgroundTask(
+            withName: "worldcast.position-sync"
+        ) { [assertion] in
+            MainActor.assumeIsolated { assertion.end() }
+        }
+        Task {
+            defer {
+                isFlushingPositions = false
+                assertion.end()
+                if flushAgainWhenDone {
+                    flushAgainWhenDone = false
+                    flushDirtyPositions()
+                }
             }
+            await pushDirtyPositions()
+        }
+    }
+
+    /// One-shot `UIBackgroundTaskIdentifier` holder. The expiration handler and
+    /// the normal completion path race each other, and iOS treats a
+    /// double-ended (or never-ended) assertion as a crash-worthy bug.
+    private final class BackgroundAssertion {
+        var id: UIBackgroundTaskIdentifier = .invalid
+        func end() {
+            guard id != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(id)
+            id = .invalid
         }
     }
 
@@ -267,7 +311,12 @@ final class LibraryStore {
             guard let sid = ep.serverId, let ts = ep.positionClientTsMs else { continue }
             do {
                 try await api.pushPosition(id: sid, position: ep.positionSeconds, clientTsMs: ts)
-                if var cur = episode(id: ep.id) { cur.positionDirty = false; update(cur) }
+                // Only clear if nothing newer was recorded while we were in
+                // flight — otherwise the fresher position would never be sent.
+                if var cur = episode(id: ep.id), cur.positionClientTsMs == ts {
+                    cur.positionDirty = false
+                    update(cur)
+                }
             } catch { /* keep dirty */ }
         }
     }
