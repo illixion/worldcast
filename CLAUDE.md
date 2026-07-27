@@ -3,6 +3,15 @@
 Quick orientation for Claude working in this repo. README is for humans; this
 file flags the non-obvious stuff. Read it before editing.
 
+## Git: always commit
+
+Standing authorization — commit completed work in this repo without asking
+first, including work left over from a previous session. Still follow the
+global git safety rules (new commits not amends, no `--no-verify`, review
+`git status`/`git diff` before staging, don't stage secrets). This does
+**not** extend to pushing, force-pushing, or any other destructive/remote
+operation — those still require explicit confirmation each time.
+
 ## What this is
 
 Single-user, Safari-installable PWA podcast listener with a small Node/Express
