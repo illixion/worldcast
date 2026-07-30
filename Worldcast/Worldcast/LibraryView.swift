@@ -6,6 +6,7 @@ import SwiftUI
 struct LibraryView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlayerModel.self) private var player
+    @Environment(AppNavigation.self) private var navigation
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var recentExpanded = false
@@ -14,7 +15,6 @@ struct LibraryView: View {
     @State private var addFeedError: String?
     @State private var addingFeed = false
     @State private var feedPendingDelete: StoredFeed?
-    @State private var showSettings = false
 
     private let recentCollapsed = 3
     private let recentExpandedCount = 20
@@ -88,10 +88,16 @@ struct LibraryView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Settings", systemImage: "gearshape") { showSettings = true }
+                    Button("Settings", systemImage: "gearshape") {
+                        navigation.showSettings()
+                    }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button("Shuffle", systemImage: "shuffle") { playRandom() }
+                    if player.hasEpisode {
+                        Button("Now Playing", systemImage: "chevron.up") {
+                            navigation.showPlayer()
+                        }
+                    }
                     Button("Sync now", systemImage: "arrow.clockwise") {
                         Task { await library.refreshAll(triggerServerSync: true) }
                     }
@@ -100,6 +106,7 @@ struct LibraryView: View {
                         addFeedError = nil
                         showAddFeed = true
                     }
+                    Button("Shuffle", systemImage: "shuffle") { playRandom() }
                 }
             }
             .refreshable { await library.refreshAll() }
@@ -141,9 +148,6 @@ struct LibraryView: View {
             }
         } message: {
             Text("Removes the feed, its episodes and any downloads.")
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
         }
         .overlay {
             if addingFeed {

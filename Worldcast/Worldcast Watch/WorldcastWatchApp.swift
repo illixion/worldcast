@@ -1,6 +1,8 @@
 import AVFoundation
+import MediaPlayer
 import Observation
 import SwiftUI
+import WatchKit
 
 @main
 struct WorldcastWatchApp: App {
@@ -29,6 +31,21 @@ struct WatchEpisode: Codable, Identifiable {
     let duration_seconds: Double?
     let position_seconds: Double?
     let played: Int?
+    let audio_available: Int?
+    let artwork_url: String?
+    let feed_artwork_url: String?
+    let feed_title: String?
+    let chapter_count: Int?
+}
+
+struct WatchChapter: Codable, Identifiable {
+    let id: Int
+    let title: String?
+    let start_ms: Double
+    let end_ms: Double?
+    let artwork_url: String?
+
+    var startSeconds: Double { start_ms / 1000 }
 }
 
 private struct WatchFeedsResponse: Codable {
@@ -37,6 +54,11 @@ private struct WatchFeedsResponse: Codable {
 
 private struct WatchEpisodesResponse: Codable {
     let episodes: [WatchEpisode]
+}
+
+private struct WatchEpisodeResponse: Codable {
+    let episode: WatchEpisode?
+    let chapters: [WatchChapter]?
 }
 
 enum WatchBackendError: LocalizedError {
@@ -67,12 +89,18 @@ final class WatchLibrary {
     var isLoading = false
     var errorMessage: String?
     var nowPlaying: WatchEpisode?
+    var chapters: [WatchChapter] = []
+    var currentChapterIndex = -1
     var isPlaying = false
     var currentTime = 0.0
+    private(set) var playGeneration = 0
 
     private let decoder = JSONDecoder()
     private let player = AVPlayer()
     private var timeObserver: Any?
+    private var itemObserver: NSKeyValueObservation?
+    private var artworkGeneration = 0
+    private var nowPlayingArtwork: MPMediaItemArtwork?
 
     init() {
         serverURL = UserDefaults.standard.string(forKey: Self.serverURLKey) ?? ""
@@ -82,12 +110,13 @@ final class WatchLibrary {
             self?.episodes = []
         }
         WatchConfigurationReceiver.shared.start()
+        configureRemoteCommands()
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 1, preferredTimescale: 1),
+            forInterval: CMTime(seconds: 0.5, preferredTimescale: 2),
             queue: .main
         ) { [weak self] time in
             MainActor.assumeIsolated {
-                self?.currentTime = time.seconds.isFinite ? time.seconds : 0
+                self?.tick(time.seconds)
             }
         }
     }
@@ -129,7 +158,32 @@ final class WatchLibrary {
         }
     }
 
-    func play(_ episode: WatchEpisode) {
+    func play(_ episode: WatchEpisode) async {
+        await load {
+            let response: WatchEpisodeResponse = try await self.request("api/episodes/\(episode.id)")
+            guard let detailedEpisode = response.episode else {
+                throw WatchBackendError.server(404)
+            }
+            self.startPlayback(detailedEpisode, chapters: response.chapters ?? [])
+        }
+    }
+
+    func playRandom() async {
+        await load {
+            let response: WatchEpisodeResponse = try await self.request("api/episodes/random-unplayed")
+            guard let episode = response.episode else {
+                self.errorMessage = "No never-played episodes available."
+                return
+            }
+            let detail: WatchEpisodeResponse = try await self.request("api/episodes/\(episode.id)")
+            guard let detailedEpisode = detail.episode else {
+                throw WatchBackendError.server(404)
+            }
+            self.startPlayback(detailedEpisode, chapters: detail.chapters ?? [])
+        }
+    }
+
+    private func startPlayback(_ episode: WatchEpisode, chapters: [WatchChapter]) {
         guard let audioURL = resolve(episode.audio_url) else {
             errorMessage = "This episode has no playable audio."
             return
@@ -143,13 +197,26 @@ final class WatchLibrary {
             return
         }
         nowPlaying = episode
+        self.chapters = chapters.sorted { $0.start_ms < $1.start_ms }
+        currentChapterIndex = -1
         currentTime = episode.position_seconds ?? 0
-        player.replaceCurrentItem(with: AVPlayerItem(url: audioURL))
+        let item = AVPlayerItem(url: audioURL)
+        itemObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            Task { @MainActor [weak self] in
+                self?.errorMessage = item.error?.localizedDescription ?? "Playback failed."
+            }
+        }
+        player.replaceCurrentItem(with: item)
         if currentTime > 1 {
             player.seek(to: CMTime(seconds: currentTime, preferredTimescale: 1))
         }
         player.play()
         isPlaying = true
+        playGeneration += 1
+        updateChapter(at: currentTime)
+        publishNowPlaying()
+        updateArtwork()
     }
 
     func togglePlayback() {
@@ -161,13 +228,31 @@ final class WatchLibrary {
             player.play()
             isPlaying = true
         }
+        publishNowPlaying()
     }
 
     func seek(by seconds: Double) {
-        let target = max(0, currentTime + seconds)
+        seek(to: currentTime + seconds)
+    }
+
+    func seek(to seconds: Double) {
+        let duration = nowPlaying?.duration_seconds ?? 0
+        let target = max(0, duration > 0 ? min(seconds, duration) : seconds)
         player.seek(to: CMTime(seconds: target, preferredTimescale: 1))
         currentTime = target
+        updateChapter(at: target)
+        publishNowPlaying()
         pushPosition()
+    }
+
+    func jumpChapter(_ direction: Int) {
+        guard !chapters.isEmpty else {
+            seek(by: direction < 0 ? -15 : 30)
+            return
+        }
+        let current = chapterIndex(at: currentTime)
+        let target = max(0, min(chapters.count - 1, (current < 0 ? 0 : current) + direction))
+        seek(to: chapters[target].startSeconds)
     }
 
     func pushPosition() {
@@ -191,6 +276,143 @@ final class WatchLibrary {
             try await operation()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func tick(_ seconds: Double) {
+        guard nowPlaying != nil, seconds.isFinite else { return }
+        currentTime = seconds
+        updateChapter(at: seconds)
+    }
+
+    private func chapterIndex(at seconds: Double) -> Int {
+        var result = -1
+        for (index, chapter) in chapters.enumerated() {
+            if seconds >= chapter.startSeconds {
+                result = index
+            } else {
+                break
+            }
+        }
+        return result
+    }
+
+    private func updateChapter(at seconds: Double) {
+        let index = chapterIndex(at: seconds)
+        guard index != currentChapterIndex else { return }
+        currentChapterIndex = index
+        publishNowPlaying()
+        updateArtwork()
+    }
+
+    private var currentChapter: WatchChapter? {
+        guard chapters.indices.contains(currentChapterIndex) else { return nil }
+        return chapters[currentChapterIndex]
+    }
+
+    private func publishNowPlaying() {
+        guard let episode = nowPlaying else {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            return
+        }
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: currentChapter?.title ?? episode.title ?? "Untitled episode",
+            MPMediaItemPropertyArtist: episode.feed_title ?? "Worldcast",
+            MPMediaItemPropertyAlbumTitle: episode.title ?? "Untitled episode",
+            MPNowPlayingInfoPropertyExternalContentIdentifier: "worldcast-watch:\(episode.id)",
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1 : 0,
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: 1,
+            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+        ]
+        if let duration = episode.duration_seconds, duration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = duration
+        }
+        if currentChapterIndex >= 0 {
+            info[MPNowPlayingInfoPropertyChapterNumber] = currentChapterIndex + 1
+            info[MPNowPlayingInfoPropertyChapterCount] = chapters.count
+        }
+        if let artwork = nowPlayingArtwork {
+            info[MPMediaItemPropertyArtwork] = artwork
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func updateArtwork() {
+        let rawURL = currentChapter?.artwork_url
+            ?? nowPlaying?.artwork_url
+            ?? nowPlaying?.feed_artwork_url
+        guard let url = resolve(rawURL) else {
+            nowPlayingArtwork = nil
+            publishNowPlaying()
+            return
+        }
+        artworkGeneration += 1
+        let generation = artworkGeneration
+        Task { [weak self] in
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                guard let image = UIImage(data: data), let self,
+                      generation == self.artworkGeneration else { return }
+                self.nowPlayingArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                self.publishNowPlaying()
+            } catch {
+                guard let self, generation == self.artworkGeneration else { return }
+                self.nowPlayingArtwork = nil
+                self.publishNowPlaying()
+            }
+        }
+    }
+
+    private func configureRemoteCommands() {
+        let commands = MPRemoteCommandCenter.shared()
+        commands.playCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.player.play()
+                self.isPlaying = true
+                self.publishNowPlaying()
+            }
+            return .success
+        }
+        commands.pauseCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.player.pause()
+                self.isPlaying = false
+                self.publishNowPlaying()
+                self.pushPosition()
+            }
+            return .success
+        }
+        commands.togglePlayPauseCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated { self?.togglePlayback() }
+            return .success
+        }
+        commands.skipBackwardCommand.preferredIntervals = [NSNumber(value: 15)]
+        commands.skipForwardCommand.preferredIntervals = [NSNumber(value: 30)]
+        commands.skipBackwardCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated { self?.seek(by: -15) }
+            return .success
+        }
+        commands.skipForwardCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated { self?.seek(by: 30) }
+            return .success
+        }
+        commands.previousTrackCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated { self?.jumpChapter(-1) }
+            return .success
+        }
+        commands.nextTrackCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated { self?.jumpChapter(1) }
+            return .success
+        }
+        commands.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent else {
+                return .commandFailed
+            }
+            MainActor.assumeIsolated { self?.seek(to: event.positionTime) }
+            return .success
         }
     }
 
@@ -222,10 +444,20 @@ final class WatchLibrary {
     }
 }
 
+private enum WatchDestination: String, Identifiable {
+    case localPlayer
+    case phoneRemote
+
+    var id: String { rawValue }
+}
+
 struct WatchContentView: View {
     @Environment(WatchLibrary.self) private var model
+    @Environment(PhoneRemote.self) private var remote
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingSettings = false
+    @State private var destination: WatchDestination?
+    @State private var wasBackgrounded = false
 
     var body: some View {
         NavigationStack {
@@ -238,8 +470,31 @@ struct WatchContentView: View {
             }
             .navigationTitle(model.selectedFeed?.title ?? "Worldcast")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Settings", systemImage: "gearshape") { showingSettings = true }
+                if model.selectedFeed != nil {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Back", systemImage: "chevron.left") {
+                            model.selectedFeed = nil
+                            model.episodes = []
+                        }
+                    }
+                }
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if model.nowPlaying != nil {
+                        Button("Now Playing", systemImage: "waveform") {
+                            showLocalPlayer()
+                        }
+                    }
+                    Button("Shuffle", systemImage: "shuffle") {
+                        Task { await model.playRandom() }
+                    }
+                }
+            }
+            .navigationDestination(item: $destination) { destination in
+                switch destination {
+                case .localPlayer:
+                    WatchPlaybackPager()
+                case .phoneRemote:
+                    PhoneRemoteView()
                 }
             }
             .sheet(isPresented: $showingSettings) {
@@ -255,9 +510,35 @@ struct WatchContentView: View {
             }
             .task(id: model.serverURL) {
                 if model.isConfigured { await model.refreshFeeds() }
+                if model.nowPlaying == nil, remote.nowPlaying != nil {
+                    showPhoneRemote()
+                }
             }
             .onChange(of: scenePhase) { _, phase in
-                if phase != .active { model.pushPosition() }
+                switch phase {
+                case .active:
+                    if wasBackgrounded {
+                        if model.nowPlaying != nil {
+                            showLocalPlayer()
+                        } else if remote.nowPlaying != nil {
+                            showPhoneRemote()
+                        }
+                    }
+                    wasBackgrounded = false
+                case .background:
+                    wasBackgrounded = true
+                    model.pushPosition()
+                case .inactive:
+                    model.pushPosition()
+                @unknown default:
+                    break
+                }
+            }
+            .onChange(of: model.playGeneration) { showLocalPlayer() }
+            .onChange(of: remote.nowPlaying?.episodeId) {
+                if remote.nowPlaying != nil, model.nowPlaying == nil {
+                    showPhoneRemote()
+                }
             }
         }
     }
@@ -265,8 +546,8 @@ struct WatchContentView: View {
     private var rootList: some View {
         List {
             Section {
-                NavigationLink {
-                    PhoneRemoteView()
+                Button {
+                    showPhoneRemote()
                 } label: {
                     Label("On My iPhone", systemImage: "iphone")
                 }
@@ -290,6 +571,9 @@ struct WatchContentView: View {
                     }
                 }
             }
+            Section {
+                Button("Settings", systemImage: "gearshape") { showingSettings = true }
+            }
         }
         .overlay { if model.isLoading { ProgressView() } }
     }
@@ -297,7 +581,7 @@ struct WatchContentView: View {
     private func episodeList(_ feed: WatchFeed) -> some View {
         List(model.episodes) { episode in
             Button {
-                model.play(episode)
+                Task { await model.play(episode) }
             } label: {
                 VStack(alignment: .leading) {
                     Text(episode.title ?? "Untitled episode").lineLimit(2)
@@ -306,42 +590,55 @@ struct WatchContentView: View {
                 }
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Back", systemImage: "chevron.left") {
-                    model.selectedFeed = nil
-                    model.episodes = []
-                }
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            if let episode = model.nowPlaying {
-                WatchPlayerControls(episode: episode)
-            }
-        }
         .overlay { if model.isLoading { ProgressView() } }
+    }
+
+    private func showLocalPlayer() {
+        destination = .localPlayer
+    }
+
+    private func showPhoneRemote() {
+        destination = .phoneRemote
     }
 }
 
-struct WatchPlayerControls: View {
+struct WatchPlaybackPager: View {
     @Environment(WatchLibrary.self) private var model
-    let episode: WatchEpisode
+    @State private var page = 0
 
     var body: some View {
-        VStack(spacing: 4) {
-            Text(episode.title ?? "Now Playing").lineLimit(1)
-            Text(WatchFormatters.time(model.currentTime)).foregroundStyle(.secondary)
-            HStack {
-                Button("-15", systemImage: "gobackward.15") { model.seek(by: -15) }
-                Button(model.isPlaying ? "Pause" : "Play",
-                       systemImage: model.isPlaying ? "pause.fill" : "play.fill") {
-                    model.togglePlayback()
+        TabView(selection: $page) {
+            NowPlayingView()
+                .tag(0)
+
+            if !model.chapters.isEmpty {
+                List {
+                    ForEach(Array(model.chapters.enumerated()), id: \.element.id) { index, chapter in
+                        Button {
+                            model.seek(to: chapter.startSeconds)
+                            page = 0
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(chapter.title ?? "Chapter \(index + 1)")
+                                    .lineLimit(2)
+                                Text(WatchFormatters.time(chapter.startSeconds))
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .listRowBackground(
+                            index == model.currentChapterIndex
+                                ? Color.accentColor.opacity(0.18)
+                                : Color.clear
+                        )
+                    }
                 }
-                Button("+30", systemImage: "goforward.30") { model.seek(by: 30) }
+                .navigationTitle("Chapters")
+                .tag(1)
             }
-            .buttonStyle(.bordered)
         }
-        .padding(.horizontal)
+        .tabViewStyle(.page(indexDisplayMode: model.chapters.isEmpty ? .never : .always))
+        .navigationTitle(page == 0 ? "Now Playing" : "Chapters")
     }
 }
 

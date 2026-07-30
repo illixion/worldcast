@@ -1,6 +1,13 @@
 import Foundation
 import Observation
 import SwiftUI
+import WatchKit
+
+struct RemoteChapter: Identifiable {
+    let id: String
+    let title: String?
+    let start: Double
+}
 
 /// Snapshot of the iPhone's now-playing state, as pushed through
 /// WatchConnectivity application context by WatchConfigurationSync on the
@@ -16,6 +23,7 @@ struct RemoteNowPlaying {
     let duration: Double
     let rate: Double
     let publishedAt: Date
+    let chapters: [RemoteChapter]
 
     init?(_ dict: [String: Any]) {
         guard let title = dict["title"] as? String,
@@ -32,6 +40,16 @@ struct RemoteNowPlaying {
         self.duration = duration
         self.rate = rate
         publishedAt = Date(timeIntervalSince1970: publishedAtRaw)
+        chapters = (dict["chapters"] as? [[String: Any]] ?? []).compactMap { chapter in
+            guard let id = chapter["id"] as? String,
+                  let start = chapter["start"] as? Double else { return nil }
+            let rawTitle = chapter["title"] as? String
+            return RemoteChapter(
+                id: id,
+                title: rawTitle.flatMap { $0.isEmpty ? nil : $0 },
+                start: start
+            )
+        }
     }
 
     /// Elapsed time extrapolated to `now`, matching how the phone's own lock
@@ -66,6 +84,7 @@ final class PhoneRemote {
         receiver.onReachabilityChanged = { [weak self] reachable in
             self?.isReachable = reachable
         }
+        receiver.start()
     }
 
     func requestStateRefresh() {
@@ -100,37 +119,43 @@ final class PhoneRemote {
     }
 }
 
-/// "On My iPhone": mirrors the Podcasts app's remote-control screen. Shows
-/// live transport controls for whatever the phone is already playing, plus
-/// the same feed/episode library the phone's own LibraryView shows — so an
-/// episode can be picked here and streaming starts on the iPhone, not the
-/// watch. This never touches WatchLibrary's `selectedFeed`/`episodes`
-/// (those drive the watch's own standalone playback below); it keeps its
-/// own local browsing state instead.
+/// "On My iPhone" keeps the system Now Playing controls and the phone library
+/// on separate swipeable pages, matching the native watchOS media-player
+/// pattern. Picking an episode starts it on the iPhone, never on this watch.
 struct PhoneRemoteView: View {
     @Environment(WatchLibrary.self) private var model
     @Environment(PhoneRemote.self) private var remote
     @State private var browsingFeed: WatchFeed?
     @State private var browsedEpisodes: [WatchEpisode] = []
     @State private var isLoadingEpisodes = false
+    @State private var page = 0
 
     var body: some View {
-        Group {
-            if let feed = browsingFeed {
-                episodeList(feed)
-            } else {
-                root
+        TabView(selection: $page) {
+            NowPlayingView()
+                .tag(0)
+
+            if let chapters = remote.nowPlaying?.chapters, !chapters.isEmpty {
+                remoteChapterList(chapters)
+                    .tag(1)
             }
+
+            libraryPage
+                .tag(2)
         }
-        .navigationTitle(browsingFeed?.title ?? "On My iPhone")
+        .tabViewStyle(.page(indexDisplayMode: .always))
+        .navigationTitle(navigationTitle)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                if let feed = browsingFeed {
+            if page == 2, browsingFeed != nil {
+                ToolbarItem(placement: .topBarLeading) {
                     Button("Back", systemImage: "chevron.left") {
                         browsingFeed = nil
                         browsedEpisodes = []
                     }
-                } else {
+                }
+            }
+            if page == 2 {
+                ToolbarItem(placement: .topBarTrailing) {
                     Button("Shuffle", systemImage: "shuffle") { remote.shuffle() }
                 }
             }
@@ -138,13 +163,23 @@ struct PhoneRemoteView: View {
         .task { remote.requestStateRefresh() }
     }
 
+    private var navigationTitle: String {
+        if page == 0 { return "Now Playing" }
+        if page == 1 { return "Chapters" }
+        return browsingFeed?.title ?? "On My iPhone"
+    }
+
+    @ViewBuilder
+    private var libraryPage: some View {
+        if let feed = browsingFeed {
+            episodeList(feed)
+        } else {
+            root
+        }
+    }
+
     private var root: some View {
         List {
-            if let np = remote.nowPlaying {
-                Section { nowPlayingBody(np) }
-            } else if !remote.hasReceivedSnapshot {
-                Section { ProgressView() }
-            }
             Section("Library") {
                 if !model.isConfigured {
                     Text("Add the server URL, including its secret token path, in Settings.")
@@ -179,6 +214,7 @@ struct PhoneRemoteView: View {
         List(browsedEpisodes) { episode in
             Button {
                 remote.playEpisode(episode)
+                page = 0
             } label: {
                 VStack(alignment: .leading) {
                     Text(episode.title ?? "Untitled episode").lineLimit(2)
@@ -190,40 +226,27 @@ struct PhoneRemoteView: View {
         .overlay { if isLoadingEpisodes { ProgressView() } }
     }
 
-    private func nowPlayingBody(_ np: RemoteNowPlaying) -> some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            VStack(spacing: 6) {
-                if let url = np.artworkURL {
-                    AsyncImage(url: url) { image in
-                        image.resizable().aspectRatio(contentMode: .fit)
-                    } placeholder: {
-                        Color.clear
+    private func remoteChapterList(_ chapters: [RemoteChapter]) -> some View {
+        List {
+            ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
+                Button {
+                    remote.seek(to: chapter.start)
+                    page = 0
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(chapter.title ?? "Chapter \(index + 1)")
+                            .lineLimit(2)
+                        Text(WatchFormatters.time(chapter.start))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
-                    .frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                Text(np.chapterTitle ?? np.title).font(.headline).lineLimit(2)
-                Text(np.feedTitle).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
-                Text(WatchFormatters.time(np.extrapolatedPosition(at: context.date))
-                     + " / " + WatchFormatters.time(np.duration))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Button("Back 15", systemImage: "gobackward.15") { remote.seekBy(-15) }
-                    Button(np.rate > 0 ? "Pause" : "Play",
-                           systemImage: np.rate > 0 ? "pause.fill" : "play.fill") {
-                        remote.toggle()
-                    }
-                    Button("Forward 30", systemImage: "goforward.30") { remote.seekBy(30) }
-                }
-                .buttonStyle(.bordered)
-                .labelStyle(.iconOnly)
-
-                if !remote.isReachable {
-                    Text("iPhone not reachable").font(.caption2).foregroundStyle(.orange)
                 }
             }
-            .padding(.horizontal)
+            if !remote.isReachable {
+                Text("iPhone not reachable")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
         }
     }
 }

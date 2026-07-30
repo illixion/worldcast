@@ -10,6 +10,7 @@ struct PlayerView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlayerModel.self) private var player
     @Environment(PlaybackSettings.self) private var settings
+    @Environment(\.dismiss) private var dismiss
 
     @State private var showDetails = false
     @State private var glowImage: UIImage?
@@ -27,10 +28,23 @@ struct PlayerView: View {
     @ViewBuilder
     private func content(_ ep: StoredEpisode) -> some View {
         VStack(spacing: 0) {
+            HStack {
+                Button {
+                    dismiss()
+                } label: {
+                    Label("Hide", systemImage: "chevron.down")
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .buttonStyle(.plain)
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 10)
+
             ScrollView {
                 VStack(spacing: 18) {
                     artworkArea(ep)
-                        .padding(.top, 12)
 
                     VStack(spacing: 5) {
                         Button {

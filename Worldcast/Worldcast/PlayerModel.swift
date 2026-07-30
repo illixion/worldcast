@@ -297,6 +297,7 @@ final class PlayerModel {
             MPMediaItemPropertyTitle: currentChapter?.title ?? ep.displayTitle,
             MPMediaItemPropertyArtist: feedTitle,
             MPMediaItemPropertyAlbumTitle: ep.displayTitle,
+            MPNowPlayingInfoPropertyExternalContentIdentifier: ep.id.uuidString,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
             MPNowPlayingInfoPropertyPlaybackRate: rate,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: playbackRate,
@@ -309,6 +310,10 @@ final class PlayerModel {
         // omit the key until we actually know the length.
         let dur = effectiveDuration
         if dur > 0 { info[MPMediaItemPropertyPlaybackDuration] = dur }
+        if currentChapterIndex >= 0 {
+            info[MPNowPlayingInfoPropertyChapterNumber] = currentChapterIndex + 1
+            info[MPNowPlayingInfoPropertyChapterCount] = chapters.count
+        }
         if let art = nowPlayingArtwork { info[MPMediaItemPropertyArtwork] = art }
 
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
@@ -324,7 +329,8 @@ final class PlayerModel {
             artworkURL: currentArtworkURL,
             position: elapsed,
             duration: dur,
-            rate: rate)
+            rate: rate,
+            chapters: chapters)
     }
 
     /// Re-publish for a watch that just asked for a fresh snapshot (e.g. its

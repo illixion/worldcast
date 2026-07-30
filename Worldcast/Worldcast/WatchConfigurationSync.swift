@@ -42,7 +42,8 @@ final class WatchConfigurationSync: NSObject, WCSessionDelegate {
     /// screen without any polling.
     func refreshNowPlaying(episodeId: String, title: String, feedTitle: String,
                             chapterTitle: String?, artworkURL: URL?,
-                            position: Double, duration: Double, rate: Double) {
+                            position: Double, duration: Double, rate: Double,
+                            chapters: [StoredChapter]) {
         var info: [String: Any] = [
             "episodeId": episodeId,
             "title": title,
@@ -51,6 +52,13 @@ final class WatchConfigurationSync: NSObject, WCSessionDelegate {
             "duration": duration,
             "rate": rate,
             "publishedAt": Date().timeIntervalSince1970,
+            "chapters": chapters.map {
+                [
+                    "id": $0.id.uuidString,
+                    "title": $0.title ?? "",
+                    "start": $0.startSeconds,
+                ] as [String: Any]
+            },
         ]
         if let chapterTitle { info["chapterTitle"] = chapterTitle }
         if let artworkURL { info["artworkURL"] = artworkURL.absoluteString }
