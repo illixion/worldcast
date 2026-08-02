@@ -86,6 +86,7 @@ final class WatchLibrary {
         didSet { UserDefaults.standard.set(serverURL, forKey: Self.serverURLKey) }
     }
     var feeds: [WatchFeed] = []
+    var recentEpisodes: [WatchEpisode] = []
     var episodes: [WatchEpisode] = []
     var selectedFeed: WatchFeed?
     var isLoading = false
@@ -131,10 +132,13 @@ final class WatchLibrary {
         return URL(string: trimmed.hasSuffix("/") ? trimmed : trimmed + "/")
     }
 
-    func refreshFeeds() async {
+    func refreshLibrary() async {
         await load {
-            let response: WatchFeedsResponse = try await self.request("api/feeds")
-            self.feeds = response.feeds
+            let feedsResponse: WatchFeedsResponse = try await self.request("api/feeds")
+            let recentResponse: WatchEpisodesResponse =
+                try await self.request("api/episodes/recent?limit=10")
+            self.feeds = feedsResponse.feeds
+            self.recentEpisodes = recentResponse.episodes
         }
     }
 
@@ -252,6 +256,7 @@ final class WatchLibrary {
         }
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
         nowPlaying = episode
+        noteRecentlyPlayed(episode)
         UserDefaults.standard.set(episode.id, forKey: Self.lastEpisodeKey)
         self.chapters = chapters.sorted { $0.start_ms < $1.start_ms }
         currentTime = max(0, position ?? episode.position_seconds ?? 0)
@@ -367,6 +372,14 @@ final class WatchLibrary {
                 method: "POST",
                 body: ["position": position, "client_ts": Date().timeIntervalSince1970 * 1000]
             )
+        }
+    }
+
+    func noteRecentlyPlayed(_ episode: WatchEpisode) {
+        recentEpisodes.removeAll { $0.id == episode.id }
+        recentEpisodes.insert(episode, at: 0)
+        if recentEpisodes.count > 10 {
+            recentEpisodes.removeLast(recentEpisodes.count - 10)
         }
     }
 
@@ -612,7 +625,7 @@ struct WatchContentView: View {
             .task(id: model.serverURL) {
                 remote.requestStateRefresh()
                 if model.isConfigured {
-                    await model.refreshFeeds()
+                    await model.refreshLibrary()
                     await model.restoreLastEpisode()
                 }
             }
@@ -661,6 +674,17 @@ struct WatchContentView: View {
                     Label("On My iPhone", systemImage: "iphone")
                 }
             }
+            if !model.recentEpisodes.isEmpty {
+                Section("Recently Played") {
+                    ForEach(model.recentEpisodes) { episode in
+                        Button {
+                            Task { await model.play(episode) }
+                        } label: {
+                            WatchEpisodeLabel(episode: episode)
+                        }
+                    }
+                }
+            }
             Section("Library") {
                 if !model.isConfigured {
                     Text("Add the server URL, including its secret token path, in Settings.")
@@ -685,6 +709,7 @@ struct WatchContentView: View {
             }
         }
         .overlay { if model.isLoading { ProgressView() } }
+        .refreshable { await model.refreshLibrary() }
     }
 
     private func episodeList(_ feed: WatchFeed) -> some View {
@@ -897,6 +922,14 @@ private struct PlaybackLibraryPage: View {
 
             handoffSection
 
+            if !model.recentEpisodes.isEmpty {
+                Section("Recently Played") {
+                    ForEach(model.recentEpisodes) { episode in
+                        episodeButton(episode)
+                    }
+                }
+            }
+
             Section("Library") {
                 if !model.isConfigured {
                     Text("Add the server URL in Settings.")
@@ -1006,6 +1039,7 @@ private struct PlaybackLibraryPage: View {
             case .phone:
                 Task {
                     if await remote.playEpisodeAwaitingReply(serverId: episode.id) {
+                        model.noteRecentlyPlayed(episode)
                         page = 0
                     } else {
                         model.errorMessage = "Could not start playback on the iPhone."
@@ -1020,6 +1054,23 @@ private struct PlaybackLibraryPage: View {
             }
         }
         .disabled(source == .phone && !remote.isReachable)
+    }
+}
+
+private struct WatchEpisodeLabel: View {
+    let episode: WatchEpisode
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(episode.title ?? "Untitled episode")
+                .lineLimit(2)
+            if let feedTitle = episode.feed_title, !feedTitle.isEmpty {
+                Text(feedTitle)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
     }
 }
 
