@@ -3,6 +3,15 @@ import Observation
 import SwiftUI
 import WatchKit
 
+enum PlaybackSource: String, CaseIterable, Identifiable {
+    case watch
+    case phone
+
+    var id: String { rawValue }
+    var title: String { self == .watch ? "Apple Watch" : "iPhone" }
+    var symbol: String { self == .watch ? "applewatch" : "iphone" }
+}
+
 struct RemoteChapter: Identifiable {
     let id: String
     let title: String?
@@ -15,6 +24,7 @@ struct RemoteChapter: Identifiable {
 /// between snapshots instead of polling.
 struct RemoteNowPlaying {
     let episodeId: String
+    let serverId: Int?
     let title: String
     let feedTitle: String
     let chapterTitle: String?
@@ -32,6 +42,8 @@ struct RemoteNowPlaying {
               let rate = dict["rate"] as? Double,
               let publishedAtRaw = dict["publishedAt"] as? Double else { return nil }
         episodeId = dict["episodeId"] as? String ?? ""
+        serverId = (dict["serverId"] as? NSNumber)?.intValue
+            ?? dict["serverId"] as? Int
         self.title = title
         feedTitle = dict["feedTitle"] as? String ?? ""
         chapterTitle = dict["chapterTitle"] as? String
@@ -57,6 +69,19 @@ struct RemoteNowPlaying {
     func extrapolatedPosition(at now: Date = Date()) -> Double {
         guard duration > 0 else { return max(0, position + rate * now.timeIntervalSince(publishedAt)) }
         return min(duration, max(0, position + rate * now.timeIntervalSince(publishedAt)))
+    }
+
+    func chapterIndex(at date: Date = Date()) -> Int {
+        let position = extrapolatedPosition(at: date)
+        var result = -1
+        for (index, chapter) in chapters.enumerated() {
+            if position >= chapter.start {
+                result = index
+            } else {
+                break
+            }
+        }
+        return result
     }
 }
 
@@ -108,8 +133,31 @@ final class PhoneRemote {
     }
 
     /// Tell the phone to start streaming a specific episode from its library.
-    func playEpisode(_ episode: WatchEpisode) {
-        WatchConfigurationReceiver.shared.sendCommand("playEpisode", ["episodeId": episode.id])
+    func playEpisode(_ episode: WatchEpisode, position: Double? = nil) {
+        playEpisode(serverId: episode.id, position: position)
+    }
+
+    func playEpisode(serverId: Int, position: Double? = nil) {
+        var payload: [String: Any] = ["episodeId": serverId]
+        if let position { payload["position"] = position }
+        WatchConfigurationReceiver.shared.sendCommand("playEpisode", payload)
+    }
+
+    func pauseAwaitingReply() async -> Bool {
+        await WatchConfigurationReceiver.shared.sendCommandAwaitingReply("pause")
+    }
+
+    func playAwaitingReply() async -> Bool {
+        await WatchConfigurationReceiver.shared.sendCommandAwaitingReply("play")
+    }
+
+    func playEpisodeAwaitingReply(serverId: Int, position: Double? = nil) async -> Bool {
+        var payload: [String: Any] = ["episodeId": serverId]
+        if let position { payload["position"] = position }
+        return await WatchConfigurationReceiver.shared.sendCommandAwaitingReply(
+            "playEpisode",
+            payload
+        )
     }
 
     /// Tell the phone to play a random never-played episode, mirroring the
@@ -119,134 +167,10 @@ final class PhoneRemote {
     }
 }
 
-/// "On My iPhone" keeps the system Now Playing controls and the phone library
-/// on separate swipeable pages, matching the native watchOS media-player
-/// pattern. Picking an episode starts it on the iPhone, never on this watch.
 struct PhoneRemoteView: View {
-    @Environment(WatchLibrary.self) private var model
-    @Environment(PhoneRemote.self) private var remote
-    @State private var browsingFeed: WatchFeed?
-    @State private var browsedEpisodes: [WatchEpisode] = []
-    @State private var isLoadingEpisodes = false
-    @State private var page = 0
+    var initialPage = 0
 
     var body: some View {
-        TabView(selection: $page) {
-            NowPlayingView()
-                .tag(0)
-
-            if let chapters = remote.nowPlaying?.chapters, !chapters.isEmpty {
-                remoteChapterList(chapters)
-                    .tag(1)
-            }
-
-            libraryPage
-                .tag(2)
-        }
-        .tabViewStyle(.page(indexDisplayMode: .always))
-        .navigationTitle(navigationTitle)
-        .toolbar {
-            if page == 2, browsingFeed != nil {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Back", systemImage: "chevron.left") {
-                        browsingFeed = nil
-                        browsedEpisodes = []
-                    }
-                }
-            }
-            if page == 2 {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Shuffle", systemImage: "shuffle") { remote.shuffle() }
-                }
-            }
-        }
-        .task { remote.requestStateRefresh() }
-    }
-
-    private var navigationTitle: String {
-        if page == 0 { return "Now Playing" }
-        if page == 1 { return "Chapters" }
-        return browsingFeed?.title ?? "On My iPhone"
-    }
-
-    @ViewBuilder
-    private var libraryPage: some View {
-        if let feed = browsingFeed {
-            episodeList(feed)
-        } else {
-            root
-        }
-    }
-
-    private var root: some View {
-        List {
-            Section("Library") {
-                if !model.isConfigured {
-                    Text("Add the server URL, including its secret token path, in Settings.")
-                        .foregroundStyle(.secondary)
-                } else if model.feeds.isEmpty {
-                    Text("No feeds yet.").foregroundStyle(.secondary)
-                } else {
-                    ForEach(model.feeds) { feed in
-                        Button {
-                            browsingFeed = feed
-                            Task {
-                                isLoadingEpisodes = true
-                                browsedEpisodes = await model.fetchEpisodes(for: feed)
-                                isLoadingEpisodes = false
-                            }
-                        } label: {
-                            VStack(alignment: .leading) {
-                                Text(feed.title ?? "Untitled feed")
-                                if let count = feed.unplayed_count, count > 0 {
-                                    Text("\(count) unplayed").foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .overlay { if model.isLoading { ProgressView() } }
-    }
-
-    private func episodeList(_ feed: WatchFeed) -> some View {
-        List(browsedEpisodes) { episode in
-            Button {
-                remote.playEpisode(episode)
-                page = 0
-            } label: {
-                VStack(alignment: .leading) {
-                    Text(episode.title ?? "Untitled episode").lineLimit(2)
-                    Text(WatchFormatters.time(episode.duration_seconds ?? 0))
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .overlay { if isLoadingEpisodes { ProgressView() } }
-    }
-
-    private func remoteChapterList(_ chapters: [RemoteChapter]) -> some View {
-        List {
-            ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
-                Button {
-                    remote.seek(to: chapter.start)
-                    page = 0
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(chapter.title ?? "Chapter \(index + 1)")
-                            .lineLimit(2)
-                        Text(WatchFormatters.time(chapter.start))
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if !remote.isReachable {
-                Text("iPhone not reachable")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            }
-        }
+        WatchPlaybackPager(initialSource: .phone, initialPage: initialPage)
     }
 }

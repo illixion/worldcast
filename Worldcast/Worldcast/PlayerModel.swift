@@ -19,6 +19,7 @@ import UIKit
 final class PlayerModel {
     static let speedSteps: [Double] = [1, 1.25, 1.5, 1.75, 2, 0.75]
     private static let speedKey = "worldcast.playbackRate"
+    private static let lastEpisodeKey = "worldcast.lastEpisodeId"
     /// How stale the lock screen's extrapolated elapsed time is allowed to get
     /// before we re-publish it. Not a position *sync* — purely local metadata.
     private static let nowPlayingDriftTolerance: Double = 1.5
@@ -48,6 +49,7 @@ final class PlayerModel {
     private var notificationTokens: [NSObjectProtocol] = []
     private var intendPlaying = false
     private var artworkFetchGeneration = 0
+    private var isRestoringLastEpisode = false
 
     // Now Playing state. We keep our own copy of everything we publish and
     // always write the dictionary whole: MPNowPlayingInfoCenter's getter is
@@ -108,7 +110,12 @@ final class PlayerModel {
 
     // MARK: - Loading
 
-    func load(episodeId: UUID, autoplay: Bool = true) async {
+    func load(
+        episodeId: UUID,
+        autoplay: Bool = true,
+        startAt position: Double? = nil,
+        announce: Bool = true
+    ) async {
         guard let library else { return }
         statusMessage = nil
         // Chapters (backend ID3 or JSON) come with the detail fetch.
@@ -123,11 +130,12 @@ final class PlayerModel {
         if let previous = episode, previous.id != ep.id { pushPosition() }
 
         episode = ep
+        UserDefaults.standard.set(ep.id.uuidString, forKey: Self.lastEpisodeKey)
         feedTitle = library.feed(id: ep.feedId)?.displayTitle ?? ""
         chapters = ep.chapters.sorted { $0.startSeconds < $1.startSeconds }
         currentChapterIndex = -2 // force first applyChapter even for -1
         duration = ep.durationSeconds ?? 0
-        loadGeneration += 1
+        if announce { loadGeneration += 1 }
         // Drop the previous item's artwork so the lock screen can't show it
         // against the new episode while the new art loads.
         nowPlayingArtwork = nil
@@ -140,7 +148,7 @@ final class PlayerModel {
         player.replaceCurrentItem(with: item)
         player.defaultRate = Float(playbackRate)
 
-        let startAt = ep.positionSeconds
+        let startAt = max(0, position ?? ep.positionSeconds)
         if startAt > 1 {
             await player.seek(to: CMTime(seconds: startAt, preferredTimescale: 1000),
                               toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
@@ -151,6 +159,22 @@ final class PlayerModel {
         if autoplay { play() }
         publishNowPlaying()
         updateNowPlayingArtwork()
+    }
+
+    @discardableResult
+    func restoreLastEpisode(autoplay: Bool = false) async -> Bool {
+        if hasEpisode {
+            if autoplay { play() }
+            return true
+        }
+        guard !isRestoringLastEpisode else { return false }
+        guard let rawId = UserDefaults.standard.string(forKey: Self.lastEpisodeKey),
+              let episodeId = UUID(uuidString: rawId),
+              library?.episode(id: episodeId) != nil else { return false }
+        isRestoringLastEpisode = true
+        defer { isRestoringLastEpisode = false }
+        await load(episodeId: episodeId, autoplay: autoplay, announce: false)
+        return hasEpisode
     }
 
     // MARK: - Transport
@@ -186,6 +210,7 @@ final class PlayerModel {
         currentTime = 0
         duration = 0
         statusMessage = nil
+        UserDefaults.standard.removeObject(forKey: Self.lastEpisodeKey)
         nowPlayingArtwork = nil
         nowPlayingArtworkURL = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
@@ -330,6 +355,7 @@ final class PlayerModel {
             position: elapsed,
             duration: dur,
             rate: rate,
+            serverId: ep.serverId,
             chapters: chapters)
     }
 

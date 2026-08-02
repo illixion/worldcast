@@ -24,6 +24,8 @@ final class AppServices {
         self.library = library
         self.player = player
         self.downloads = downloads
+
+        Task { await player.restoreLastEpisode() }
     }
 }
 

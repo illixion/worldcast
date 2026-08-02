@@ -79,6 +79,8 @@ enum WatchBackendError: LocalizedError {
 @MainActor
 final class WatchLibrary {
     static let serverURLKey = "worldcast.watch.serverBaseURL"
+    private static let lastEpisodeKey = "worldcast.watch.lastEpisodeId"
+    private static let lastPositionKey = "worldcast.watch.lastPosition"
 
     var serverURL: String {
         didSet { UserDefaults.standard.set(serverURL, forKey: Self.serverURLKey) }
@@ -158,13 +160,62 @@ final class WatchLibrary {
         }
     }
 
-    func play(_ episode: WatchEpisode) async {
+    @discardableResult
+    func play(_ episode: WatchEpisode, startAt position: Double? = nil) async -> Bool {
+        var started = false
         await load {
             let response: WatchEpisodeResponse = try await self.request("api/episodes/\(episode.id)")
             guard let detailedEpisode = response.episode else {
                 throw WatchBackendError.server(404)
             }
-            self.startPlayback(detailedEpisode, chapters: response.chapters ?? [])
+            self.startPlayback(
+                detailedEpisode,
+                chapters: response.chapters ?? [],
+                position: position,
+                autoplay: true
+            )
+            started = true
+        }
+        return started
+    }
+
+    @discardableResult
+    func play(serverId: Int, startAt position: Double) async -> Bool {
+        var started = false
+        await load {
+            let response: WatchEpisodeResponse = try await self.request("api/episodes/\(serverId)")
+            guard let episode = response.episode else {
+                throw WatchBackendError.server(404)
+            }
+            self.startPlayback(
+                episode,
+                chapters: response.chapters ?? [],
+                position: position,
+                autoplay: true
+            )
+            started = true
+        }
+        return started
+    }
+
+    func restoreLastEpisode() async {
+        let defaults = UserDefaults.standard
+        guard nowPlaying == nil, isConfigured,
+              defaults.object(forKey: Self.lastEpisodeKey) != nil else { return }
+        let episodeId = defaults.integer(forKey: Self.lastEpisodeKey)
+        let position = defaults.double(forKey: Self.lastPositionKey)
+        await load {
+            let response: WatchEpisodeResponse = try await self.request("api/episodes/\(episodeId)")
+            guard let episode = response.episode else {
+                throw WatchBackendError.server(404)
+            }
+            self.startPlayback(
+                episode,
+                chapters: response.chapters ?? [],
+                position: position,
+                autoplay: false,
+                announce: false
+            )
         }
     }
 
@@ -179,27 +230,34 @@ final class WatchLibrary {
             guard let detailedEpisode = detail.episode else {
                 throw WatchBackendError.server(404)
             }
-            self.startPlayback(detailedEpisode, chapters: detail.chapters ?? [])
+            self.startPlayback(
+                detailedEpisode,
+                chapters: detail.chapters ?? [],
+                position: nil,
+                autoplay: true
+            )
         }
     }
 
-    private func startPlayback(_ episode: WatchEpisode, chapters: [WatchChapter]) {
+    private func startPlayback(
+        _ episode: WatchEpisode,
+        chapters: [WatchChapter],
+        position: Double?,
+        autoplay: Bool,
+        announce: Bool = true
+    ) {
         guard let audioURL = resolve(episode.audio_url) else {
             errorMessage = "This episode has no playable audio."
             return
         }
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio)
-            try session.setActive(true)
-        } catch {
-            errorMessage = error.localizedDescription
-            return
-        }
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
         nowPlaying = episode
+        UserDefaults.standard.set(episode.id, forKey: Self.lastEpisodeKey)
         self.chapters = chapters.sorted { $0.start_ms < $1.start_ms }
-        currentChapterIndex = -1
-        currentTime = episode.position_seconds ?? 0
+        currentTime = max(0, position ?? episode.position_seconds ?? 0)
+        currentChapterIndex = chapterIndex(at: currentTime)
+        saveLocalPosition()
+        nowPlayingArtwork = nil
         let item = AVPlayerItem(url: audioURL)
         itemObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard item.status == .failed else { return }
@@ -211,24 +269,66 @@ final class WatchLibrary {
         if currentTime > 1 {
             player.seek(to: CMTime(seconds: currentTime, preferredTimescale: 1))
         }
-        player.play()
-        isPlaying = true
-        playGeneration += 1
-        updateChapter(at: currentTime)
-        publishNowPlaying()
-        updateArtwork()
+        if autoplay {
+            resumePlayback()
+            updateArtwork()
+        } else {
+            player.pause()
+            isPlaying = false
+        }
+        if announce { playGeneration += 1 }
     }
 
     func togglePlayback() {
         if isPlaying {
-            player.pause()
-            isPlaying = false
-            pushPosition()
+            pausePlayback()
         } else {
-            player.play()
-            isPlaying = true
+            resumePlayback()
         }
+    }
+
+    func resumePlayback() {
+        guard nowPlaying != nil else { return }
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio)
+            try session.setActive(true)
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+        player.play()
+        isPlaying = true
         publishNowPlaying()
+    }
+
+    func pausePlayback() {
+        player.pause()
+        isPlaying = false
+        publishNowPlaying()
+        pushPosition()
+    }
+
+    func relinquishPlayback() {
+        if isPlaying {
+            pausePlayback()
+        } else {
+            player.pause()
+        }
+        player.replaceCurrentItem(with: nil)
+        itemObserver = nil
+        nowPlaying = nil
+        chapters = []
+        currentChapterIndex = -1
+        currentTime = 0
+        isPlaying = false
+        UserDefaults.standard.removeObject(forKey: Self.lastEpisodeKey)
+        UserDefaults.standard.removeObject(forKey: Self.lastPositionKey)
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
     }
 
     func seek(by seconds: Double) {
@@ -240,6 +340,7 @@ final class WatchLibrary {
         let target = max(0, duration > 0 ? min(seconds, duration) : seconds)
         player.seek(to: CMTime(seconds: target, preferredTimescale: 1))
         currentTime = target
+        saveLocalPosition()
         updateChapter(at: target)
         publishNowPlaying()
         pushPosition()
@@ -258,6 +359,7 @@ final class WatchLibrary {
     func pushPosition() {
         guard let nowPlaying else { return }
         let position = currentTime
+        saveLocalPosition()
         Task {
             struct Response: Codable { let ok: Bool? }
             let _: Response? = try? await request(
@@ -282,7 +384,12 @@ final class WatchLibrary {
     private func tick(_ seconds: Double) {
         guard nowPlaying != nil, seconds.isFinite else { return }
         currentTime = seconds
+        if Int(seconds) % 10 == 0 { saveLocalPosition() }
         updateChapter(at: seconds)
+    }
+
+    private func saveLocalPosition() {
+        UserDefaults.standard.set(currentTime, forKey: Self.lastPositionKey)
     }
 
     private func chapterIndex(at seconds: Double) -> Int {
@@ -368,20 +475,13 @@ final class WatchLibrary {
         let commands = MPRemoteCommandCenter.shared()
         commands.playCommand.addTarget { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self else { return }
-                self.player.play()
-                self.isPlaying = true
-                self.publishNowPlaying()
+                self?.resumePlayback()
             }
             return .success
         }
         commands.pauseCommand.addTarget { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self else { return }
-                self.player.pause()
-                self.isPlaying = false
-                self.publishNowPlaying()
-                self.pushPosition()
+                self?.pausePlayback()
             }
             return .success
         }
@@ -457,7 +557,7 @@ struct WatchContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingSettings = false
     @State private var destination: WatchDestination?
-    @State private var wasBackgrounded = false
+    @State private var phoneInitialPage = 0
 
     var body: some View {
         NavigationStack {
@@ -481,6 +581,7 @@ struct WatchContentView: View {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if model.nowPlaying != nil {
                         Button("Now Playing", systemImage: "waveform") {
+                            model.resumePlayback()
                             showLocalPlayer()
                         }
                     }
@@ -492,9 +593,9 @@ struct WatchContentView: View {
             .navigationDestination(item: $destination) { destination in
                 switch destination {
                 case .localPlayer:
-                    WatchPlaybackPager()
+                    WatchPlaybackPager(initialSource: .watch)
                 case .phoneRemote:
-                    PhoneRemoteView()
+                    PhoneRemoteView(initialPage: phoneInitialPage)
                 }
             }
             .sheet(isPresented: $showingSettings) {
@@ -509,45 +610,53 @@ struct WatchContentView: View {
                 Text(model.errorMessage ?? "")
             }
             .task(id: model.serverURL) {
-                if model.isConfigured { await model.refreshFeeds() }
-                if model.nowPlaying == nil, remote.nowPlaying != nil {
-                    showPhoneRemote()
+                remote.requestStateRefresh()
+                if model.isConfigured {
+                    await model.refreshFeeds()
+                    await model.restoreLastEpisode()
                 }
             }
             .onChange(of: scenePhase) { _, phase in
-                switch phase {
-                case .active:
-                    if wasBackgrounded {
-                        if model.nowPlaying != nil {
-                            showLocalPlayer()
-                        } else if remote.nowPlaying != nil {
-                            showPhoneRemote()
-                        }
-                    }
-                    wasBackgrounded = false
-                case .background:
-                    wasBackgrounded = true
-                    model.pushPosition()
-                case .inactive:
-                    model.pushPosition()
-                @unknown default:
-                    break
-                }
+                if phase != .active { model.pushPosition() }
             }
             .onChange(of: model.playGeneration) { showLocalPlayer() }
-            .onChange(of: remote.nowPlaying?.episodeId) {
-                if remote.nowPlaying != nil, model.nowPlaying == nil {
-                    showPhoneRemote()
-                }
-            }
         }
     }
 
     private var rootList: some View {
         List {
+            if model.nowPlaying != nil || remote.nowPlaying != nil {
+                Section("Resume") {
+                    if let episode = model.nowPlaying {
+                        Button {
+                            model.resumePlayback()
+                            showLocalPlayer()
+                        } label: {
+                            Label(
+                                episode.title ?? "On Apple Watch",
+                                systemImage: "applewatch"
+                            )
+                        }
+                    }
+                    if let nowPlaying = remote.nowPlaying {
+                        Button {
+                            Task {
+                                if await remote.playAwaitingReply() {
+                                    showPhoneRemote()
+                                } else {
+                                    model.errorMessage = "Could not resume playback on the iPhone."
+                                }
+                            }
+                        } label: {
+                            Label(nowPlaying.title, systemImage: "iphone")
+                        }
+                    }
+                }
+            }
             Section {
                 Button {
-                    showPhoneRemote()
+                    remote.requestStateRefresh()
+                    showPhoneRemote(initialPage: 2)
                 } label: {
                     Label("On My iPhone", systemImage: "iphone")
                 }
@@ -597,35 +706,101 @@ struct WatchContentView: View {
         destination = .localPlayer
     }
 
-    private func showPhoneRemote() {
+    private func showPhoneRemote(initialPage: Int = 0) {
+        phoneInitialPage = initialPage
         destination = .phoneRemote
     }
 }
 
 struct WatchPlaybackPager: View {
     @Environment(WatchLibrary.self) private var model
-    @State private var page = 0
+    @Environment(PhoneRemote.self) private var remote
+    @State private var source: PlaybackSource
+    @State private var page: Int
+
+    init(initialSource: PlaybackSource, initialPage: Int = 0) {
+        _source = State(initialValue: initialSource)
+        _page = State(initialValue: initialPage)
+    }
 
     var body: some View {
         TabView(selection: $page) {
             NowPlayingView()
                 .tag(0)
 
-            if !model.chapters.isEmpty {
+            Group {
+                switch source {
+                case .watch:
+                    LocalChapterList(page: $page)
+                case .phone:
+                    RemoteChapterList(page: $page)
+                }
+            }
+            .tag(1)
+
+            PlaybackLibraryPage(source: $source, page: $page)
+                .tag(2)
+        }
+        .tabViewStyle(.page(indexDisplayMode: .always))
+        .navigationTitle(pageTitle)
+        .toolbar {
+            if page == 2 {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Shuffle", systemImage: "shuffle") {
+                        switch source {
+                        case .watch:
+                            Task { await model.playRandom() }
+                        case .phone:
+                            remote.shuffle()
+                        }
+                    }
+                    .disabled(source == .phone && !remote.isReachable)
+                }
+            }
+        }
+        .task { remote.requestStateRefresh() }
+    }
+
+    private var pageTitle: String {
+        switch page {
+        case 1: "Chapters"
+        case 2: source.title
+        default: "Now Playing"
+        }
+    }
+}
+
+private struct LocalChapterList: View {
+    @Environment(WatchLibrary.self) private var model
+    @Binding var page: Int
+
+    var body: some View {
+        if model.chapters.isEmpty {
+            ContentUnavailableView("No Chapters", systemImage: "list.bullet")
+        } else {
+            ScrollViewReader { proxy in
                 List {
                     ForEach(Array(model.chapters.enumerated()), id: \.element.id) { index, chapter in
                         Button {
                             model.seek(to: chapter.startSeconds)
                             page = 0
                         } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(chapter.title ?? "Chapter \(index + 1)")
-                                    .lineLimit(2)
-                                Text(WatchFormatters.time(chapter.startSeconds))
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(chapter.title ?? "Chapter \(index + 1)")
+                                        .lineLimit(2)
+                                    Text(WatchFormatters.time(chapter.startSeconds))
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if index == model.currentChapterIndex {
+                                    Image(systemName: "waveform")
+                                        .foregroundStyle(Color.accentColor)
+                                }
                             }
                         }
+                        .id(chapter.id)
                         .listRowBackground(
                             index == model.currentChapterIndex
                                 ? Color.accentColor.opacity(0.18)
@@ -633,12 +808,218 @@ struct WatchPlaybackPager: View {
                         )
                     }
                 }
-                .navigationTitle("Chapters")
-                .tag(1)
+                .task(id: model.currentChapterIndex) {
+                    guard model.chapters.indices.contains(model.currentChapterIndex) else { return }
+                    await Task.yield()
+                    withAnimation {
+                        proxy.scrollTo(
+                            model.chapters[model.currentChapterIndex].id,
+                            anchor: .center
+                        )
+                    }
+                }
             }
         }
-        .tabViewStyle(.page(indexDisplayMode: model.chapters.isEmpty ? .never : .always))
-        .navigationTitle(page == 0 ? "Now Playing" : "Chapters")
+    }
+}
+
+private struct RemoteChapterList: View {
+    @Environment(PhoneRemote.self) private var remote
+    @Binding var page: Int
+
+    var body: some View {
+        if let nowPlaying = remote.nowPlaying, !nowPlaying.chapters.isEmpty {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let currentIndex = nowPlaying.chapterIndex(at: context.date)
+                ScrollViewReader { proxy in
+                    List {
+                        ForEach(Array(nowPlaying.chapters.enumerated()), id: \.element.id) { index, chapter in
+                            Button {
+                                remote.seek(to: chapter.start)
+                                page = 0
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(chapter.title ?? "Chapter \(index + 1)")
+                                            .lineLimit(2)
+                                        Text(WatchFormatters.time(chapter.start))
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    if index == currentIndex {
+                                        Image(systemName: "waveform")
+                                            .foregroundStyle(Color.accentColor)
+                                    }
+                                }
+                            }
+                            .id(chapter.id)
+                            .listRowBackground(
+                                index == currentIndex
+                                    ? Color.accentColor.opacity(0.18)
+                                    : Color.clear
+                            )
+                        }
+                    }
+                    .task(id: currentIndex) {
+                        guard nowPlaying.chapters.indices.contains(currentIndex) else { return }
+                        await Task.yield()
+                        withAnimation {
+                            proxy.scrollTo(nowPlaying.chapters[currentIndex].id, anchor: .center)
+                        }
+                    }
+                }
+            }
+        } else {
+            ContentUnavailableView("No Chapters", systemImage: "list.bullet")
+        }
+    }
+}
+
+private struct PlaybackLibraryPage: View {
+    @Environment(WatchLibrary.self) private var model
+    @Environment(PhoneRemote.self) private var remote
+    @Binding var source: PlaybackSource
+    @Binding var page: Int
+    @State private var browsingFeed: WatchFeed?
+    @State private var browsedEpisodes: [WatchEpisode] = []
+    @State private var isLoadingEpisodes = false
+
+    var body: some View {
+        List {
+            Section {
+                Picker("Play On", selection: $source) {
+                    ForEach(PlaybackSource.allCases) { source in
+                        Label(source.title, systemImage: source.symbol).tag(source)
+                    }
+                }
+            }
+
+            handoffSection
+
+            Section("Library") {
+                if !model.isConfigured {
+                    Text("Add the server URL in Settings.")
+                        .foregroundStyle(.secondary)
+                } else if browsingFeed != nil {
+                    Button("All Feeds", systemImage: "chevron.left") {
+                        self.browsingFeed = nil
+                        browsedEpisodes = []
+                    }
+                    ForEach(browsedEpisodes) { episode in
+                        episodeButton(episode)
+                    }
+                } else if model.feeds.isEmpty {
+                    Text("No feeds yet.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.feeds) { feed in
+                        Button {
+                            self.browsingFeed = feed
+                            Task {
+                                isLoadingEpisodes = true
+                                browsedEpisodes = await model.fetchEpisodes(for: feed)
+                                isLoadingEpisodes = false
+                            }
+                        } label: {
+                            VStack(alignment: .leading) {
+                                Text(feed.title ?? "Untitled feed")
+                                if let count = feed.unplayed_count, count > 0 {
+                                    Text("\(count) unplayed").foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if source == .phone && !remote.isReachable {
+                Text("iPhone not reachable")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .overlay { if isLoadingEpisodes || model.isLoading { ProgressView() } }
+        .onChange(of: source) {
+            browsingFeed = nil
+            browsedEpisodes = []
+        }
+    }
+
+    @ViewBuilder
+    private var handoffSection: some View {
+        switch source {
+        case .watch:
+            if let phone = remote.nowPlaying {
+                Section {
+                    Button("Continue on Apple Watch", systemImage: "applewatch") {
+                        guard let serverId = phone.serverId else {
+                            model.errorMessage = "This iPhone episode is not available on the watch."
+                            return
+                        }
+                        Task {
+                            let position = phone.extrapolatedPosition()
+                            guard await remote.pauseAwaitingReply() else {
+                                model.errorMessage = "Could not pause playback on the iPhone."
+                                return
+                            }
+                            if await model.play(serverId: serverId, startAt: position) {
+                                page = 0
+                            } else {
+                                remote.play()
+                            }
+                        }
+                    }
+                }
+            }
+        case .phone:
+            if let episode = model.nowPlaying {
+                Section {
+                    Button("Continue on iPhone", systemImage: "iphone") {
+                        Task {
+                            let shouldResumeOnFailure = model.isPlaying
+                            model.pausePlayback()
+                            if await remote.playEpisodeAwaitingReply(
+                                serverId: episode.id,
+                                position: model.currentTime
+                            ) {
+                                model.relinquishPlayback()
+                                page = 0
+                            } else {
+                                if shouldResumeOnFailure { model.resumePlayback() }
+                                model.errorMessage = "Could not start playback on the iPhone."
+                            }
+                        }
+                    }
+                    .disabled(!remote.isReachable)
+                }
+            }
+        }
+    }
+
+    private func episodeButton(_ episode: WatchEpisode) -> some View {
+        Button {
+            switch source {
+            case .watch:
+                Task {
+                    if await model.play(episode) { page = 0 }
+                }
+            case .phone:
+                Task {
+                    if await remote.playEpisodeAwaitingReply(serverId: episode.id) {
+                        page = 0
+                    } else {
+                        model.errorMessage = "Could not start playback on the iPhone."
+                    }
+                }
+            }
+        } label: {
+            VStack(alignment: .leading) {
+                Text(episode.title ?? "Untitled episode").lineLimit(2)
+                Text(WatchFormatters.time(episode.duration_seconds ?? 0))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .disabled(source == .phone && !remote.isReachable)
     }
 }
 

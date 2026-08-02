@@ -43,7 +43,7 @@ final class WatchConfigurationSync: NSObject, WCSessionDelegate {
     func refreshNowPlaying(episodeId: String, title: String, feedTitle: String,
                             chapterTitle: String?, artworkURL: URL?,
                             position: Double, duration: Double, rate: Double,
-                            chapters: [StoredChapter]) {
+                            serverId: Int?, chapters: [StoredChapter]) {
         var info: [String: Any] = [
             "episodeId": episodeId,
             "title": title,
@@ -60,6 +60,7 @@ final class WatchConfigurationSync: NSObject, WCSessionDelegate {
                 ] as [String: Any]
             },
         ]
+        if let serverId { info["serverId"] = serverId }
         if let chapterTitle { info["chapterTitle"] = chapterTitle }
         if let artworkURL { info["artworkURL"] = artworkURL.absoluteString }
         updateContext { $0[Self.nowPlayingContextKey] = info }
@@ -85,16 +86,23 @@ final class WatchConfigurationSync: NSObject, WCSessionDelegate {
     func session(_ session: WCSession, didReceiveMessage message: [String: Any],
                  replyHandler: @escaping ([String: Any]) -> Void) {
         Task { @MainActor [weak self] in
-            replyHandler(self?.handle(message: message) ?? ["ok": false])
+            replyHandler(await self?.handle(message: message) ?? ["ok": false])
         }
     }
 
     @MainActor
     @discardableResult
-    private func handle(message: [String: Any]) -> [String: Any] {
+    private func handle(message: [String: Any]) async -> [String: Any] {
         guard let player, let cmd = message["cmd"] as? String else { return ["ok": false] }
         switch cmd {
-        case "play": player.play()
+        case "play":
+            if player.hasEpisode {
+                player.play()
+            } else {
+                guard await player.restoreLastEpisode(autoplay: true) else {
+                    return ["ok": false]
+                }
+            }
         case "pause": player.pause()
         case "toggle": player.toggle()
         case "seek":
@@ -104,14 +112,25 @@ final class WatchConfigurationSync: NSObject, WCSessionDelegate {
         case "chapter":
             if let dir = message["dir"] as? Int { player.jumpChapter(dir) }
         case "requestState":
-            player.republishNowPlaying()
+            if player.hasEpisode {
+                player.republishNowPlaying()
+            } else {
+                guard await player.restoreLastEpisode() else { return ["ok": false] }
+                player.republishNowPlaying()
+            }
         case "playEpisode":
-            guard let serverId = message["episodeId"] as? Int,
+            let serverId = (message["episodeId"] as? NSNumber)?.intValue
+                ?? message["episodeId"] as? Int
+            guard let serverId,
                   let ep = library?.episode(serverId: serverId) else { return ["ok": false] }
-            Task { await player.load(episodeId: ep.id) }
+            let position = (message["position"] as? NSNumber)?.doubleValue
+                ?? message["position"] as? Double
+            await player.load(episodeId: ep.id, startAt: position)
+            guard player.episode?.id == ep.id else { return ["ok": false] }
         case "shuffle":
             guard let ep = library?.randomNeverPlayed() else { return ["ok": false] }
-            Task { await player.load(episodeId: ep.id) }
+            await player.load(episodeId: ep.id)
+            guard player.episode?.id == ep.id else { return ["ok": false] }
         default:
             return ["ok": false]
         }
