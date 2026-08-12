@@ -48,6 +48,7 @@ final class PlaybackSettings {
         static let skipBack = "worldcast.skipBackInterval"
         static let skipForward = "worldcast.skipForwardInterval"
         static let trackAction = "worldcast.trackCommandAction"
+        static let spatialAudio = "worldcast.spatialAudioEnabled"
     }
 
     private static let defaultSkipBack: Double = 15
@@ -69,6 +70,21 @@ final class PlaybackSettings {
         }
     }
 
+    /// Whether playback uses head-tracked spatial rendering or flat stereo
+    /// passthrough. Off by default: episodes arrive as an already-mixed
+    /// stereo track, so on visionOS the system's automatic spatial
+    /// experience just anchors that mix to a point in the room rather than
+    /// adding anything — spatializing it is a user choice, not automatic.
+    /// Persisted; PlayerModel applies it live to the running session, no
+    /// restart needed.
+    var spatialAudioEnabled: Bool {
+        didSet {
+            guard spatialAudioEnabled != oldValue else { return }
+            defaults.set(spatialAudioEnabled, forKey: Key.spatialAudio)
+            announce()
+        }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -79,6 +95,7 @@ final class PlaybackSettings {
         skipForwardInterval = Self.sanitize(forward, fallback: Self.defaultSkipForward)
         trackCommandAction = defaults.string(forKey: Key.trackAction)
             .flatMap(TrackCommandAction.init(rawValue:)) ?? .chapter
+        spatialAudioEnabled = defaults.bool(forKey: Key.spatialAudio)
     }
 
     private func commit(_ value: Double, _ key: String, _ oldValue: Double) {

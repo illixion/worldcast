@@ -136,6 +136,15 @@ struct SettingsView: View {
         } footer: {
             Text(trackActionFooter)
         }
+
+#if os(visionOS)
+        Section {
+            Toggle("Spatial audio", isOn: $settings.spatialAudioEnabled)
+        } footer: {
+            Text("Head-tracked rendering that anchors playback to a point in "
+                 + "the room, instead of flat stereo. Off by default.")
+        }
+#endif
     }
 
     private var trackActionFooter: String {

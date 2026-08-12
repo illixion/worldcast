@@ -79,6 +79,7 @@ final class PlayerModel {
         // Set the category up front (without activating) so the Now Playing
         // info we publish before the first play() isn't discarded.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
+        applySpatialAudioSetting()
         configureRemoteCommands()
         applyRemoteCommandConfig()
         observePlayer()
@@ -622,19 +623,40 @@ final class PlayerModel {
         })
         // Settings changed → the remote command center needs the new
         // intervals pushed to it (the lock screen renders its skip glyphs from
-        // preferredIntervals, so polling isn't enough).
+        // preferredIntervals, so polling isn't enough), and the audio session
+        // needs the new spatial-audio experience applied live.
         notificationTokens.append(center.addObserver(
             forName: PlaybackSettings.didChangeNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.applyRemoteCommandConfig() }
+            MainActor.assumeIsolated {
+                self?.applyRemoteCommandConfig()
+                self?.applySpatialAudioSetting()
+            }
         })
     }
 
     private func configureAudioSession() {
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .spokenAudio)
+        applySpatialAudioSetting(on: session)
         try? session.setActive(true)
+    }
+
+    /// visionOS-only: episodes arrive as an already-mixed stereo track, so
+    /// spatializing them is a user choice rather than automatic — mirrors
+    /// the pattern in Longwave's AudioStreamManager. Safe to call whether
+    /// or not the session is currently active. No-op elsewhere:
+    /// `setIntendedSpatialExperience` doesn't exist on iOS, where AirPods
+    /// spatial audio personalization isn't a per-app control anyway.
+    private func applySpatialAudioSetting(on session: AVAudioSession = .sharedInstance()) {
+#if os(visionOS)
+        try? session.setIntendedSpatialExperience(
+            settings.spatialAudioEnabled
+                ? .headTracked(soundStageSize: .automatic, anchoringStrategy: .automatic)
+                : .bypassed
+        )
+#endif
     }
 
     // MARK: - Remote commands
