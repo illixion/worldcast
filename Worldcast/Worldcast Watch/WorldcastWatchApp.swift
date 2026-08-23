@@ -97,6 +97,7 @@ final class WatchLibrary {
     var isPlaying = false
     var currentTime = 0.0
     private(set) var playGeneration = 0
+    let downloads = WatchDownloadManager()
 
     private let decoder = JSONDecoder()
     private let player = AVPlayer()
@@ -113,6 +114,12 @@ final class WatchLibrary {
             self?.episodes = []
         }
         WatchConfigurationReceiver.shared.start()
+        downloads.fetchDetail = { [weak self] episodeId in
+            guard let self else { throw WatchBackendError.notConfigured }
+            let response: WatchEpisodeResponse = try await self.request("api/episodes/\(episodeId)")
+            guard let episode = response.episode else { throw WatchBackendError.server(404) }
+            return (episode, response.chapters ?? [])
+        }
         configureRemoteCommands()
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.5, preferredTimescale: 2),
@@ -166,6 +173,17 @@ final class WatchLibrary {
 
     @discardableResult
     func play(_ episode: WatchEpisode, startAt position: Double? = nil) async -> Bool {
+        if let local = downloads.localAudioURL(for: episode.id) {
+            let detailedEpisode = downloads.downloaded[episode.id]?.episode ?? episode
+            startPlayback(
+                detailedEpisode,
+                chapters: downloads.chapters(for: episode.id) ?? [],
+                position: position,
+                autoplay: true,
+                localFileURL: local
+            )
+            return true
+        }
         var started = false
         await load {
             let response: WatchEpisodeResponse = try await self.request("api/episodes/\(episode.id)")
@@ -183,8 +201,43 @@ final class WatchLibrary {
         return started
     }
 
+    /// Kicks off an offline download for `episode`: refetches its detail
+    /// (for chapter data) and hands the audio URL to `WatchDownloadManager`.
+    func startDownload(_ episode: WatchEpisode) {
+        Task {
+            do {
+                let response: WatchEpisodeResponse = try await request("api/episodes/\(episode.id)")
+                guard let detailedEpisode = response.episode,
+                      let audioURL = resolve(detailedEpisode.audio_url) else {
+                    errorMessage = "This episode has no playable audio."
+                    return
+                }
+                downloads.startDownload(
+                    episode: detailedEpisode,
+                    chapters: response.chapters ?? [],
+                    audioURL: audioURL
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     @discardableResult
     func play(serverId: Int, startAt position: Double) async -> Bool {
+        if let local = downloads.localAudioURL(for: serverId) {
+            let episode = downloads.downloaded[serverId]?.episode
+            if let episode {
+                startPlayback(
+                    episode,
+                    chapters: downloads.chapters(for: serverId) ?? [],
+                    position: position,
+                    autoplay: true,
+                    localFileURL: local
+                )
+                return true
+            }
+        }
         var started = false
         await load {
             let response: WatchEpisodeResponse = try await self.request("api/episodes/\(serverId)")
@@ -204,10 +257,23 @@ final class WatchLibrary {
 
     func restoreLastEpisode() async {
         let defaults = UserDefaults.standard
-        guard nowPlaying == nil, isConfigured,
+        guard nowPlaying == nil,
               defaults.object(forKey: Self.lastEpisodeKey) != nil else { return }
         let episodeId = defaults.integer(forKey: Self.lastEpisodeKey)
         let position = defaults.double(forKey: Self.lastPositionKey)
+        if let local = downloads.localAudioURL(for: episodeId),
+           let episode = downloads.downloaded[episodeId]?.episode {
+            startPlayback(
+                episode,
+                chapters: downloads.chapters(for: episodeId) ?? [],
+                position: position,
+                autoplay: false,
+                announce: false,
+                localFileURL: local
+            )
+            return
+        }
+        guard isConfigured else { return }
         await load {
             let response: WatchEpisodeResponse = try await self.request("api/episodes/\(episodeId)")
             guard let episode = response.episode else {
@@ -248,9 +314,10 @@ final class WatchLibrary {
         chapters: [WatchChapter],
         position: Double?,
         autoplay: Bool,
-        announce: Bool = true
+        announce: Bool = true,
+        localFileURL: URL? = nil
     ) {
-        guard let audioURL = resolve(episode.audio_url) else {
+        guard let audioURL = localFileURL ?? resolve(episode.audio_url) else {
             errorMessage = "This episode has no playable audio."
             return
         }
@@ -677,10 +744,17 @@ struct WatchContentView: View {
             if !model.recentEpisodes.isEmpty {
                 Section("Recently Played") {
                     ForEach(model.recentEpisodes) { episode in
-                        Button {
+                        WatchDownloadableEpisodeRow(episode: episode, showFeedTitle: true) {
                             Task { await model.play(episode) }
-                        } label: {
-                            WatchEpisodeLabel(episode: episode)
+                        }
+                    }
+                }
+            }
+            if !model.downloads.downloadedEpisodes.isEmpty {
+                Section("Downloaded") {
+                    ForEach(model.downloads.downloadedEpisodes) { episode in
+                        WatchDownloadableEpisodeRow(episode: episode, showFeedTitle: true) {
+                            Task { await model.play(episode) }
                         }
                     }
                 }
@@ -714,14 +788,8 @@ struct WatchContentView: View {
 
     private func episodeList(_ feed: WatchFeed) -> some View {
         List(model.episodes) { episode in
-            Button {
+            WatchDownloadableEpisodeRow(episode: episode) {
                 Task { await model.play(episode) }
-            } label: {
-                VStack(alignment: .leading) {
-                    Text(episode.title ?? "Untitled episode").lineLimit(2)
-                    Text(WatchFormatters.time(episode.duration_seconds ?? 0))
-                        .foregroundStyle(.secondary)
-                }
             }
         }
         .overlay { if model.isLoading { ProgressView() } }
@@ -1029,14 +1097,17 @@ private struct PlaybackLibraryPage: View {
         }
     }
 
+    @ViewBuilder
     private func episodeButton(_ episode: WatchEpisode) -> some View {
-        Button {
-            switch source {
-            case .watch:
+        switch source {
+        case .watch:
+            WatchDownloadableEpisodeRow(episode: episode) {
                 Task {
                     if await model.play(episode) { page = 0 }
                 }
-            case .phone:
+            }
+        case .phone:
+            Button {
                 Task {
                     if await remote.playEpisodeAwaitingReply(serverId: episode.id) {
                         model.noteRecentlyPlayed(episode)
@@ -1045,30 +1116,81 @@ private struct PlaybackLibraryPage: View {
                         model.errorMessage = "Could not start playback on the iPhone."
                     }
                 }
+            } label: {
+                VStack(alignment: .leading) {
+                    Text(episode.title ?? "Untitled episode").lineLimit(2)
+                    Text(WatchFormatters.time(episode.duration_seconds ?? 0))
+                        .foregroundStyle(.secondary)
+                }
             }
-        } label: {
-            VStack(alignment: .leading) {
-                Text(episode.title ?? "Untitled episode").lineLimit(2)
-                Text(WatchFormatters.time(episode.duration_seconds ?? 0))
-                    .foregroundStyle(.secondary)
-            }
+            .disabled(!remote.isReachable)
         }
-        .disabled(source == .phone && !remote.isReachable)
     }
 }
 
-private struct WatchEpisodeLabel: View {
+private struct WatchDownloadableEpisodeRow: View {
+    @Environment(WatchLibrary.self) private var model
     let episode: WatchEpisode
+    var showFeedTitle = false
+    let action: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(episode.title ?? "Untitled episode")
-                .lineLimit(2)
-            if let feedTitle = episode.feed_title, !feedTitle.isEmpty {
-                Text(feedTitle)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        Button(action: action) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(episode.title ?? "Untitled episode").lineLimit(2)
+                    if showFeedTitle, let feedTitle = episode.feed_title, !feedTitle.isEmpty {
+                        Text(feedTitle)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text(WatchFormatters.time(episode.duration_seconds ?? 0))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                downloadIndicator
+            }
+        }
+        .swipeActions { downloadSwipeAction }
+    }
+
+    @ViewBuilder
+    private var downloadIndicator: some View {
+        switch model.downloads.state(for: episode.id) {
+        case .downloading(let progress):
+            ProgressView(value: max(0.02, progress)).frame(width: 24)
+        case .failed:
+            Image(systemName: "exclamationmark.circle").foregroundStyle(.red)
+        case nil:
+            if model.downloads.isDownloaded(episode.id) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .imageScale(.small)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var downloadSwipeAction: some View {
+        switch model.downloads.state(for: episode.id) {
+        case .downloading:
+            Button("Cancel", systemImage: "xmark") {
+                model.downloads.cancelDownload(for: episode.id)
+            }
+            .tint(.red)
+        default:
+            if model.downloads.isDownloaded(episode.id) {
+                Button("Remove", systemImage: "trash") {
+                    model.downloads.removeDownload(for: episode.id)
+                }
+                .tint(.red)
+            } else {
+                Button("Download", systemImage: "arrow.down.circle") {
+                    model.startDownload(episode)
+                }
+                .tint(.blue)
             }
         }
     }
