@@ -65,6 +65,17 @@ final class PlayerModel {
     private var lastTimeControlStatus: AVPlayer.TimeControlStatus = .paused
     private var appliedPolicy: AVAudioSession.RouteSharingPolicy?
 
+    // Transient-stall recovery. A stall or failedToPlayToEndTime is NOT fatal
+    // (see onPlaybackTrouble) so we retry rather than pause: pausing while
+    // backgrounded drops the audio session, which tears down an AirPlay route.
+    private static let maxRecoveryAttempts = 5
+    private var recoveryAttempts = 0
+    private var recoveryTask: Task<Void, Never>?
+    /// Position when trouble last struck. The retry ladder only resets once
+    /// playback has genuinely moved past it, so a stream that plays a second
+    /// and stalls again can't retry forever.
+    private var recoveryAnchor: Double = 0
+
     // Position-push de-duplication: pause() and the timeControlStatus observer
     // can both fire for one user action.
     private var lastPushedEpisode: UUID?
@@ -149,6 +160,7 @@ final class PlayerModel {
         nowPlayingArtworkURL = nil
         lastPushedEpisode = nil
         lastPushedPosition = -1
+        cancelRecovery()
 
         // Decide the AirPlay story *before* the item swap so the player never
         // briefly considers external playback for the incoming episode.
@@ -204,6 +216,7 @@ final class PlayerModel {
 
     func pause() {
         intendPlaying = false
+        cancelRecovery()
         player.pause()
         isPlaying = false
         publishNowPlaying()
@@ -422,6 +435,12 @@ final class PlayerModel {
         guard let ep = episode else { return }
         let pos = position ?? playbackPosition
         guard pos.isFinite else { return }
+        // A freshly swapped item reports 0 until its seek lands, and the
+        // timeControlStatus observer reads that swap as playing → paused. Left
+        // alone it would overwrite a real position with zero — now visible on
+        // every stall retry, which rebuilds the item mid-episode. An explicit
+        // `at:` (a deliberate seek back to the start) is always honoured.
+        if position == nil, pos < 1, currentTime > 1 { return }
         if lastPushedEpisode == ep.id, abs(pos - lastPushedPosition) < 0.5 { return }
         lastPushedEpisode = ep.id
         lastPushedPosition = pos
@@ -454,6 +473,63 @@ final class PlayerModel {
         }
     }
 
+    /// A stall or a failedToPlayToEndTime is *transient* — a network hiccup, an
+    /// AirPlay receiver that wanted a deeper buffer. Retry rather than stop:
+    /// this used to route into advance(), whose end-of-queue branch calls
+    /// player.pause(), and pausing while backgrounded surrenders the background
+    /// audio assertion — taking any AirPlay route down with it. Only a
+    /// hard item failure (status == .failed, e.g. the file 404s) still advances.
+    private func onPlaybackTrouble(_ what: String) {
+        publishNowPlaying()
+        guard intendPlaying, episode != nil else {
+            log("\(what) — not recovering, playback wasn't intended")
+            return
+        }
+        guard recoveryAttempts < Self.maxRecoveryAttempts else {
+            log("\(what) — giving up after \(recoveryAttempts) attempts")
+            statusMessage = "Playback stalled — tap play to retry."
+            return
+        }
+        if recoveryAttempts == 0 { recoveryAnchor = playbackPosition }
+        recoveryAttempts += 1
+        let attempt = recoveryAttempts
+        let delay = min(8, 1 << (attempt - 1))
+        log("\(what) — recovery attempt \(attempt)/\(Self.maxRecoveryAttempts) in \(delay)s")
+        recoveryTask?.cancel()
+        recoveryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self, self.intendPlaying else { return }
+            self.retryPlayback()
+        }
+    }
+
+    private func cancelRecovery() {
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        recoveryAttempts = 0
+    }
+
+    /// Rebuild the current item in place and pick up where we left off. The old
+    /// item is unusable after failedToPlayToEndTime, so a bare play() wouldn't
+    /// be enough.
+    private func retryPlayback() {
+        guard let ep = episode, let url = library?.playbackURL(for: ep) else { return }
+        let resumeAt = playbackPosition
+        let item = AVPlayerItem(url: url)
+        observe(item)
+        player.replaceCurrentItem(with: item)
+        player.defaultRate = Float(playbackRate)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if resumeAt > 1 {
+                await self.player.seek(to: CMTime(seconds: resumeAt, preferredTimescale: 1000),
+                                      toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
+            }
+            guard self.intendPlaying else { return }
+            self.play()
+        }
+    }
+
     // MARK: - Observation plumbing
 
     private func installTimeObserver() {
@@ -469,6 +545,10 @@ final class PlayerModel {
         guard episode != nil, seconds.isFinite else { return }
         if !isScrubbing { currentTime = seconds }
         adoptItemDuration()
+        if recoveryAttempts > 0, isPlaying, seconds > recoveryAnchor + 10 {
+            log("playback recovered after \(recoveryAttempts) attempt(s)")
+            cancelRecovery()
+        }
         let idx = chapterIndex(at: seconds)
         if idx != currentChapterIndex { applyChapter(idx) }
         refreshNowPlayingIfDrifted()
@@ -537,8 +617,12 @@ final class PlayerModel {
         itemNotificationTokens.append(center.addObserver(
             forName: AVPlayerItem.failedToPlayToEndTimeNotification,
             object: item, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.onItemFailed("Playback error") }
+        ) { [weak self] note in
+            let reason = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
+                .localizedDescription
+            MainActor.assumeIsolated {
+                self?.onPlaybackTrouble("failed to play to end: \(reason ?? "no reason given")")
+            }
         })
         // A seek performed outside our own seek() path (or a live-stream
         // window shift) invalidates the elapsed time we published.
@@ -552,7 +636,7 @@ final class PlayerModel {
             forName: AVPlayerItem.playbackStalledNotification,
             object: item, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.publishNowPlaying() }
+            MainActor.assumeIsolated { self?.onPlaybackTrouble("playback stalled") }
         })
     }
 
@@ -608,31 +692,37 @@ final class PlayerModel {
                       let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
                 switch type {
                 case .began:
+                    self.log("audio session interrupted")
                     self.isPlaying = false
                     self.publishNowPlaying()
                     self.pushPosition()
                 case .ended:
                     let opts = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt)
                         .map(AVAudioSession.InterruptionOptions.init(rawValue:)) ?? []
+                    self.log("interruption ended (shouldResume \(opts.contains(.shouldResume)), intendPlaying \(self.intendPlaying))")
                     if self.intendPlaying && opts.contains(.shouldResume) { self.play() }
                 @unknown default:
                     break
                 }
             }
         })
-        // AirPods pulled out / Bluetooth device gone: iOS pauses us. Get the
-        // position out while we still have runtime.
+        // Route changes: AirPods pulled out, Bluetooth gone, an AirPlay
+        // receiver dropping off the network. Every reason is logged — a route
+        // that dies mid-episode is otherwise completely invisible.
         notificationTokens.append(center.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: AVAudioSession.sharedInstance(), queue: .main
         ) { [weak self] note in
-            MainActor.assumeIsolated {
-                guard let self, self.hasEpisode,
-                      let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-                      AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable
-                else { return }
-                self.pushPosition()
-            }
+            MainActor.assumeIsolated { self?.onRouteChange(note) }
+        })
+        // The media server can be torn down under us (resource pressure, a
+        // codec fault). Both the session and the player are invalid afterwards
+        // and must be rebuilt — a documented cause of audio simply stopping.
+        notificationTokens.append(center.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.onMediaServicesReset() }
         })
         // Settings changed → the remote command center needs the new
         // intervals pushed to it (the lock screen renders its skip glyphs from
@@ -671,7 +761,65 @@ final class PlayerModel {
             }
         }
         applySpatialAudioSetting(on: session)
-        if activate { try? session.setActive(true) }
+        if activate {
+            do {
+                try session.setActive(true)
+            } catch {
+                // An activation failure is how a lost route manifests; a bare
+                // try? here is why one looked like "it just disconnected".
+                log("audio session could not be activated: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func log(_ message: String) {
+        NSLog("Worldcast: %@", message)
+    }
+
+    private static func describe(_ reason: AVAudioSession.RouteChangeReason) -> String {
+        switch reason {
+        case .unknown: return "unknown"
+        case .newDeviceAvailable: return "newDeviceAvailable"
+        case .oldDeviceUnavailable: return "oldDeviceUnavailable"
+        case .categoryChange: return "categoryChange"
+        case .override: return "override"
+        case .wakeFromSleep: return "wakeFromSleep"
+        case .noSuitableRouteForCategory: return "noSuitableRouteForCategory"
+        case .routeConfigurationChange: return "routeConfigurationChange"
+        @unknown default: return "unhandled(\(reason.rawValue))"
+        }
+    }
+
+    private func onRouteChange(_ note: Notification) {
+        let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+            .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) ?? .unknown
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+        let now = outputs.map { "\($0.portName) [\($0.portType.rawValue)]" }
+            .joined(separator: ", ")
+        let previous = (note.userInfo?[AVAudioSessionRouteChangePreviousRouteKey]
+            as? AVAudioSessionRouteDescription)?
+            .outputs.map(\.portName).joined(separator: ", ")
+        log("""
+            route change \(Self.describe(reason)): \
+            \(previous ?? "none") → \(now.isEmpty ? "none" : now)
+            """)
+        guard hasEpisode else { return }
+        // iOS has already paused us by the time this lands. Bank the position
+        // while we still have runtime.
+        if reason == .oldDeviceUnavailable { pushPosition() }
+        // Deliberately NOT resuming: when a route disappears iOS pauses on
+        // purpose, and resuming would push audio out of the built-in speaker —
+        // the one outcome worse than silence. The log above is what tells us
+        // whether a dropped AirPlay route even reports oldDeviceUnavailable.
+    }
+
+    private func onMediaServicesReset() {
+        log("media services were reset — rebuilding audio session and player")
+        appliedPolicy = nil // the session lost its configuration entirely
+        guard let ep = episode else { return }
+        applyAudioSession(policy: ep.isVideo ? .longFormVideo : .longFormAudio,
+                          activate: intendPlaying)
+        if intendPlaying { retryPlayback() }
     }
 
     /// visionOS-only: episodes arrive as an already-mixed stereo track, so
