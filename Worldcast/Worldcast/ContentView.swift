@@ -18,17 +18,27 @@ struct ContentView: View {
         tabs
 #if os(visionOS)
             // No tabViewBottomAccessory on visionOS (tabs live in the side
-            // ornament) — float the bar in a glass panel instead.
+            // ornament) — float the mini player in a glass capsule instead.
             .safeAreaInset(edge: .bottom) {
-                bottomBar
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .glassBackgroundEffect(in: .rect(cornerRadius: 24))
-                    .padding(.bottom, 12)
+                if player.hasEpisode {
+                    MiniPlayerView()
+                        .padding(.horizontal, 6)
+                        .glassBackgroundEffect(in: .capsule)
+                        .onTapGesture { isPlayerPresented = true }
+                        .padding(.bottom, 12)
+                }
             }
 #else
-            .tabViewBottomAccessory(isEnabled: true) {
-                bottomBar
+            // isEnabled (rather than conditional content) is required here:
+            // this accessory's content height must stay constant while
+            // enabled, or the tab content's safe-area inset gets stale and
+            // list rows scroll up underneath the (now taller) glass bar.
+            // Toggling isEnabled is the transition the system actually
+            // re-measures for. The Shuffle button lives in LibraryView's own
+            // safeAreaInset instead of sharing this slot for that reason.
+            .tabViewBottomAccessory(isEnabled: player.hasEpisode) {
+                MiniPlayerView()
+                    .onTapGesture { isPlayerPresented = true }
             }
 #endif
             .onChange(of: player.loadGeneration) {
@@ -75,43 +85,6 @@ struct ContentView: View {
         .tabBarMinimizeBehavior(.onScrollDown)
 #endif
     }
-
-    /// Always-visible shuffle affordance plus the mini "Now Playing" strip
-    /// (only once something's loaded), stacked in one bottom accessory slot
-    /// so they read as a single bar instead of two competing safe-area insets.
-    private var bottomBar: some View {
-        VStack(spacing: 10) {
-            ShuffleButton()
-            if player.hasEpisode {
-                MiniPlayerView()
-                    .contentShape(Rectangle())
-                    .onTapGesture { isPlayerPresented = true }
-            }
-        }
-    }
-}
-
-private struct ShuffleButton: View {
-    @Environment(LibraryStore.self) private var library
-    @Environment(PlayerModel.self) private var player
-
-    var body: some View {
-        Button(action: playRandom) {
-            Label("Shuffle", systemImage: "shuffle")
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-    }
-
-    private func playRandom() {
-        if let ep = library.randomNeverPlayed() {
-            Task { await player.load(episodeId: ep.id) }
-        } else {
-            player.statusMessage = "No never-played episodes available."
-        }
-    }
 }
 
 struct MiniPlayerView: View {
@@ -142,5 +115,6 @@ struct MiniPlayerView: View {
             .padding(.trailing, 4)
         }
         .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 }

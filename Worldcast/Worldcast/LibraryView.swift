@@ -83,6 +83,14 @@ struct LibraryView: View {
                 }
             }
             .refreshable { await library.refreshAll(triggerServerSync: true) }
+            // Lives here (not the app-wide bottom accessory) so it has a
+            // constant height of its own and never fights the mini player
+            // accessory's enable/disable-only sizing — see ContentView.
+            .safeAreaInset(edge: .bottom) {
+                ShuffleButton()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+            }
         }
         .task { await pollLoop() }
         .onChange(of: scenePhase) { _, phase in
@@ -113,6 +121,30 @@ struct LibraryView: View {
             try? await Task.sleep(for: .seconds(15))
             guard scenePhase == .active else { continue }
             await library.updateBackendStatusText()
+        }
+    }
+}
+
+/// Big always-visible shuffle affordance pinned above the Home list.
+struct ShuffleButton: View {
+    @Environment(LibraryStore.self) private var library
+    @Environment(PlayerModel.self) private var player
+
+    var body: some View {
+        Button(action: playRandom) {
+            Label("Shuffle", systemImage: "shuffle")
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+    }
+
+    private func playRandom() {
+        if let ep = library.randomNeverPlayed() {
+            Task { await player.load(episodeId: ep.id) }
+        } else {
+            player.statusMessage = "No never-played episodes available."
         }
     }
 }
