@@ -63,6 +63,7 @@ final class PlayerModel {
     private var publishedRate: Double = -1
     private var publishedAt = Date.distantPast
     private var lastTimeControlStatus: AVPlayer.TimeControlStatus = .paused
+    private var appliedPolicy: AVAudioSession.RouteSharingPolicy?
 
     // Position-push de-duplication: pause() and the timeControlStatus observer
     // can both fire for one user action.
@@ -74,17 +75,17 @@ final class PlayerModel {
         let saved = UserDefaults.standard.double(forKey: Self.speedKey)
         playbackRate = Self.speedSteps.contains(saved) ? saved : 1
 #if !os(visionOS)
-        player.allowsExternalPlayback = true
+        // AVPlayer's "external playback" IS AirPlay *video*: with it enabled the
+        // player claims the AirPlay route itself and hands the item to the Apple
+        // TV to render, which for an audio-only episode wakes the TV, draws the
+        // player chrome over a black frame waiting for a video track that never
+        // arrives, then times out and drops. Off by default; load() turns it
+        // back on per-episode for genuine video episodes.
+        player.allowsExternalPlayback = false
 #endif
         // Set the category up front (without activating) so the Now Playing
         // info we publish before the first play() isn't discarded.
-        // .longFormAudio is required for podcasts/audiobooks: without it,
-        // Control Center's AirPlay button offers the video-mirroring route
-        // (turns the TV on, shows a black frame waiting for video that never
-        // arrives, then the session times out and disconnects) instead of a
-        // plain audio-speaker route to the Apple TV.
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, policy: .longFormAudio)
-        applySpatialAudioSetting()
+        applyAudioSession(policy: .longFormAudio)
         configureRemoteCommands()
         applyRemoteCommandConfig()
         observePlayer()
@@ -149,6 +150,13 @@ final class PlayerModel {
         lastPushedEpisode = nil
         lastPushedPosition = -1
 
+        // Decide the AirPlay story *before* the item swap so the player never
+        // briefly considers external playback for the incoming episode.
+#if !os(visionOS)
+        player.allowsExternalPlayback = ep.isVideo
+#endif
+        applyAudioSession(policy: ep.isVideo ? .longFormVideo : .longFormAudio)
+
         let item = AVPlayerItem(url: url)
         observe(item)
         player.replaceCurrentItem(with: item)
@@ -186,7 +194,7 @@ final class PlayerModel {
     // MARK: - Transport
 
     func play() {
-        configureAudioSession()
+        applyAudioSession(policy: appliedPolicy ?? .longFormAudio, activate: true)
         intendPlaying = true
         player.play()
         player.rate = Float(playbackRate)
@@ -641,11 +649,29 @@ final class PlayerModel {
         })
     }
 
-    private func configureAudioSession() {
+    /// Route-sharing policy follows the episode: `.longFormAudio` so Control
+    /// Center's audio picker offers the Apple TV as a plain speaker (screen
+    /// stays off), `.longFormVideo` for video episodes that should reach a
+    /// screen. Re-applying the same policy is skipped so a redundant
+    /// setCategory can't glitch audio that's already playing.
+    private func applyAudioSession(
+        policy: AVAudioSession.RouteSharingPolicy,
+        activate: Bool = false
+    ) {
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .spokenAudio, policy: .longFormAudio)
+        if appliedPolicy != policy {
+            do {
+                try session.setCategory(.playback, mode: .spokenAudio, policy: policy)
+                appliedPolicy = policy
+            } catch {
+                // Don't swallow this: a silently rejected policy is exactly the
+                // failure mode that would make a routing fix look like a no-op.
+                NSLog("Worldcast: audio session policy could not be set: %@",
+                      error.localizedDescription)
+            }
+        }
         applySpatialAudioSetting(on: session)
-        try? session.setActive(true)
+        if activate { try? session.setActive(true) }
     }
 
     /// visionOS-only: episodes arrive as an already-mixed stereo track, so
