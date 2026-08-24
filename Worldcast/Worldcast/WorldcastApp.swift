@@ -12,7 +12,6 @@ struct WorldcastApp: App {
                 .environment(services.library)
                 .environment(services.player)
                 .environment(services.downloads)
-                .environment(services.navigation)
                 .environment(PlaybackSettings.shared)
         }
     }

@@ -9,7 +9,6 @@ struct SettingsView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlayerModel.self) private var player
     @Environment(PlaybackSettings.self) private var settings
-    @Environment(\.dismiss) private var dismiss
     @AppStorage(BackendAPI.baseURLDefaultsKey) private var serverBaseURL = ""
 
     @State private var draft = ""
@@ -75,14 +74,11 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Save") { save() }
                         .bold()
+                        .disabled(draft == serverBaseURL)
                 }
             }
             .onAppear { draft = serverBaseURL }
@@ -189,11 +185,11 @@ struct SettingsView: View {
 
     private func save() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft = trimmed
         serverBaseURL = trimmed
         if syncServerToWatch {
             WatchConfigurationSync.shared.sendServerURL(trimmed)
         }
-        dismiss()
         Task { await library.refreshAll() }
     }
 

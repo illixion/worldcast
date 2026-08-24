@@ -1,5 +1,3 @@
-import Observation
-
 @MainActor
 final class AppServices {
     static let shared = AppServices()
@@ -7,7 +5,6 @@ final class AppServices {
     let library: LibraryStore
     let player: PlayerModel
     let downloads: DownloadManager
-    let navigation = AppNavigation()
 
     private init() {
         let library = LibraryStore()
@@ -26,37 +23,5 @@ final class AppServices {
         self.downloads = downloads
 
         Task { await player.restoreLastEpisode() }
-    }
-}
-
-@Observable
-@MainActor
-final class AppNavigation {
-    enum Sheet: String, Identifiable {
-        case player
-        case settings
-
-        var id: String { rawValue }
-    }
-
-    var presentedSheet: Sheet?
-    private var presentPlayerAfterDismissal = false
-
-    func showPlayer() {
-        if presentedSheet == .settings {
-            presentPlayerAfterDismissal = true
-        } else {
-            presentedSheet = .player
-        }
-    }
-
-    func showSettings() {
-        presentedSheet = .settings
-    }
-
-    func sheetDidDismiss() {
-        guard presentPlayerAfterDismissal else { return }
-        presentPlayerAfterDismissal = false
-        presentedSheet = .player
     }
 }

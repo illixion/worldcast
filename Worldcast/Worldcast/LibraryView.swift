@@ -1,19 +1,15 @@
 import SwiftUI
 
-// Root library screen: recently played (collapsed 3 / expanded 20, like the
-// web UI), feed list with unplayed badges, add/remove feeds, shuffle, sync.
+// "Home" tab: recently played (collapsed 3 / expanded 20, like the web UI),
+// feed list with unplayed badges, swipe-to-unsubscribe. Pull-to-refresh
+// triggers a server sync; adding feeds lives in the "Add" tab.
 
 struct LibraryView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(PlayerModel.self) private var player
-    @Environment(AppNavigation.self) private var navigation
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var recentExpanded = false
-    @State private var showAddFeed = false
-    @State private var newFeedURL = ""
-    @State private var addFeedError: String?
-    @State private var addingFeed = false
     @State private var feedPendingDelete: StoredFeed?
 
     private let recentCollapsed = 3
@@ -50,7 +46,7 @@ struct LibraryView: View {
 
                 Section {
                     if library.sortedFeeds.isEmpty {
-                        Text("No feeds yet. Add one with the + button.")
+                        Text("No feeds yet. Add one from the Add tab.")
                             .foregroundStyle(.secondary)
                             .font(.subheadline)
                     }
@@ -86,55 +82,13 @@ struct LibraryView: View {
                     EpisodeDetailView(episodeId: id)
                 }
             }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Settings", systemImage: "gearshape") {
-                        navigation.showSettings()
-                    }
-                }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    if player.hasEpisode {
-                        Button("Now Playing", systemImage: "chevron.up") {
-                            navigation.showPlayer()
-                        }
-                    }
-                    Button("Sync now", systemImage: "arrow.clockwise") {
-                        Task { await library.refreshAll(triggerServerSync: true) }
-                    }
-                    Button("Add feed", systemImage: "plus") {
-                        newFeedURL = ""
-                        addFeedError = nil
-                        showAddFeed = true
-                    }
-                    Button("Shuffle", systemImage: "shuffle") { playRandom() }
-                }
-            }
-            .refreshable { await library.refreshAll() }
+            .refreshable { await library.refreshAll(triggerServerSync: true) }
         }
         .task { await pollLoop() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { await library.refreshAll() }
             }
-        }
-        .alert("Add Feed", isPresented: $showAddFeed) {
-            TextField("Feed URL", text: $newFeedURL,
-                      prompt: Text(verbatim: "https://example.com/feed.xml")
-                        .foregroundStyle(.secondary))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .keyboardType(.URL)
-            Button("Cancel", role: .cancel) {}
-            Button("Add") { addFeed() }
-        } message: {
-            Text("RSS feed URL")
-        }
-        .alert("Could not add feed", isPresented: .init(
-            get: { addFeedError != nil }, set: { if !$0 { addFeedError = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(addFeedError ?? "")
         }
         .confirmationDialog(
             "Unsubscribe from \(feedPendingDelete?.displayTitle ?? "")?",
@@ -148,31 +102,6 @@ struct LibraryView: View {
             }
         } message: {
             Text("Removes the feed, its episodes and any downloads.")
-        }
-        .overlay {
-            if addingFeed {
-                ProgressView("Adding feed…")
-                    .padding(20)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            }
-        }
-    }
-
-    private func addFeed() {
-        let url = newFeedURL
-        addingFeed = true
-        Task {
-            defer { addingFeed = false }
-            do { try await library.addFeed(urlString: url) }
-            catch { addFeedError = error.localizedDescription }
-        }
-    }
-
-    private func playRandom() {
-        if let ep = library.randomNeverPlayed() {
-            Task { await player.load(episodeId: ep.id) }
-        } else {
-            player.statusMessage = "No never-played episodes available."
         }
     }
 
