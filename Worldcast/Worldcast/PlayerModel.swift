@@ -78,7 +78,12 @@ final class PlayerModel {
 #endif
         // Set the category up front (without activating) so the Now Playing
         // info we publish before the first play() isn't discarded.
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
+        // .longFormAudio is required for podcasts/audiobooks: without it,
+        // Control Center's AirPlay button offers the video-mirroring route
+        // (turns the TV on, shows a black frame waiting for video that never
+        // arrives, then the session times out and disconnects) instead of a
+        // plain audio-speaker route to the Apple TV.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, policy: .longFormAudio)
         applySpatialAudioSetting()
         configureRemoteCommands()
         applyRemoteCommandConfig()
@@ -638,7 +643,7 @@ final class PlayerModel {
 
     private func configureAudioSession() {
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .spokenAudio)
+        try? session.setCategory(.playback, mode: .spokenAudio, policy: .longFormAudio)
         applySpatialAudioSetting(on: session)
         try? session.setActive(true)
     }
